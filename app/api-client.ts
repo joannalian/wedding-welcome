@@ -1,4 +1,4 @@
-import type { AppState } from './model';
+import type { AppState, EventSummary } from './model';
 import { appsScriptUrl } from './public-config';
 
 const endpoint = appsScriptUrl;
@@ -25,4 +25,16 @@ export async function loadEvent(eventCode: string, token: string) {
 
 export async function saveEvent(state: AppState, token: string) {
   return callCloud<{ revision: number }>('saveEvent', { eventCode: state.settings.eventCode, token, state });
+}
+
+export async function listAdminEvents(googleIdToken: string) {
+  return callCloud<{ adminEmail: string; events: EventSummary[] }>('listEvents', { googleIdToken });
+}
+
+export async function loginAdminEvent(eventCode: string, googleIdToken: string) {
+  return callCloud<{ token: string; state: AppState }>('login', { eventCode, role: 'admin', googleIdToken });
+}
+
+export async function createAdminEvent(eventName: string, cakeStock: number, googleIdToken: string) {
+  return callCloud<{ state: AppState; folderUrl: string; spreadsheetUrl: string }>('createEvent', { eventName, cakeStock, googleIdToken });
 }

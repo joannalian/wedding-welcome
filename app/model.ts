@@ -48,6 +48,15 @@ export type AppState = {
   guests: GuestGroup[];
 };
 
+export type EventSummary = {
+  eventName: string;
+  eventCode: string;
+  receptionOpen: boolean;
+  guestCount: number;
+  completedCount: number;
+  updatedAt: string | null;
+};
+
 export function deriveStatus(guest: GuestGroup): GuestStatus {
   if (guest.actual <= 0) return 'waiting';
   if (guest.actual < guest.expected) return 'partial';
@@ -73,7 +82,7 @@ export function allocateActual(guest: GuestGroup) {
   [...result].sort((a, b) => b.remainder - a.remainder).forEach((item) => {
     if (rest > 0) { item.actual += 1; rest -= 1; }
   });
-  return result.map(({ remainder: _remainder, ...item }) => item);
+  return result.map((item) => ({ table: item.table, planned: item.planned, actual: item.actual }));
 }
 
 export function maskPhone(phone: string) {
