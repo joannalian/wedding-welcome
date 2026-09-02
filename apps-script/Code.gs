@@ -14,7 +14,7 @@ function doPost(e) {
   try {
     const input = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     const routes = {
-      createEvent: createEvent_, login: login_, loadEvent: loadEvent_, saveEvent: saveEvent_,
+      listEvents: listEvents_, createEvent: createEvent_, login: login_, loadEvent: loadEvent_, saveEvent: saveEvent_,
       readGoogleSheet: readGoogleSheet_, closeReception: closeReception_, health: () => ({ service: '好日子迎賓' }),
     };
     if (!routes[input.action]) throw new Error('不支援的操作');
@@ -40,9 +40,30 @@ function createEvent_(input) {
     guests: [],
   };
   writeState_(book, state);
-  PropertiesService.getScriptProperties().setProperty(EVENT_PREFIX + eventCode, JSON.stringify({ spreadsheetId:book.getId(), folderId:folder.getId(), adminEmail:admin.email }));
+  PropertiesService.getScriptProperties().setProperty(EVENT_PREFIX + eventCode, JSON.stringify({ spreadsheetId:book.getId(), folderId:folder.getId(), adminEmail:admin.email, createdAt:new Date().toISOString() }));
   audit_(book, 'admin', admin.email, '建立婚宴', '', eventName);
   return { state, folderUrl:folder.getUrl(), spreadsheetUrl:book.getUrl() };
+}
+
+function listEvents_(input) {
+  const admin = verifyAdmin_(input.googleIdToken);
+  const properties = PropertiesService.getScriptProperties().getProperties();
+  const events = Object.keys(properties).filter(key => key.indexOf(EVENT_PREFIX) === 0).map(key => {
+    const eventCode = key.slice(EVENT_PREFIX.length);
+    const record = parseJson_(properties[key], null);
+    if (!record || String(record.adminEmail).toLowerCase() !== String(admin.email).toLowerCase()) return null;
+    try {
+      const book = SpreadsheetApp.openById(record.spreadsheetId);
+      const state = readState_(book);
+      const updatedCell = book.getSheetByName(SHEETS.SETTINGS).getRange(8,2).getValue();
+      return {
+        eventName:state.settings.eventName, eventCode, receptionOpen:state.settings.receptionOpen,
+        guestCount:state.guests.length, completedCount:state.guests.filter(guest => guest.completed).length,
+        updatedAt:dateIso_(updatedCell),
+      };
+    } catch (_) { return null; }
+  }).filter(Boolean).sort((a,b) => String(b.updatedAt||'').localeCompare(String(a.updatedAt||'')));
+  return { adminEmail:admin.email, events };
 }
 
 function login_(input) {
@@ -54,9 +75,11 @@ function login_(input) {
     return { token:signToken_({ eventCode:input.eventCode, role:'admin', name:admin.email, exp:Date.now()+12*60*60*1000 }), role:'admin', state:setRole_(state,'admin',admin.email) };
   }
   if (!state.settings.receptionOpen) throw new Error('本場婚宴接待已關閉');
-  if (role === 'planner' && (!state.settings.plannerEnabled || String(input.pin)!==String(state.settings.plannerPin))) throw new Error('婚顧 PIN 不正確');
-  if (role === 'reception' && String(input.pin)!==String(state.settings.receptionPin)) throw new Error('接待 PIN 不正確');
   if (!['planner','reception'].includes(role)) throw new Error('角色不正確');
+  assertPinAllowed_(input.eventCode, role);
+  if (role === 'planner' && (!state.settings.plannerEnabled || String(input.pin)!==String(state.settings.plannerPin))) { recordPinFailure_(input.eventCode,role); throw new Error('婚顧 PIN 不正確'); }
+  if (role === 'reception' && String(input.pin)!==String(state.settings.receptionPin)) { recordPinFailure_(input.eventCode,role); throw new Error('接待 PIN 不正確'); }
+  clearPinFailures_(input.eventCode,role);
   const name = clean_(input.operator) || (role === 'planner' ? '婚顧' : '接待人員');
   return { token:signToken_({ eventCode:input.eventCode, role, name, exp:Date.now()+12*60*60*1000 }), role, state:setRole_(state,role,name) };
 }
@@ -129,9 +152,13 @@ function writeState_(book,state) {
 function setRole_(state,role,name){state.settings.role=role;state.settings.operator=name;if(role==='planner'){state.guests=state.guests.map(g=>Object.assign({},g,{phone:'',giftAmount:null,giftName:'',note:'',giftReceived:false,bagNamed:false}));}return state;}
 function audit_(book,role,name,action,guestId,detail){book.getSheetByName(SHEETS.AUDIT).appendRow([new Date(),role,name,action,guestId,detail]);}
 function eventRecord_(code){const raw=PropertiesService.getScriptProperties().getProperty(EVENT_PREFIX+clean_(code));if(!raw)throw new Error('找不到婚宴代碼');return JSON.parse(raw);}
-function verifyAdmin_(idToken,expectedEmail){if(!idToken)throw new Error('請使用 Admin Google 帳號登入');const response=UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token='+encodeURIComponent(idToken),{muteHttpExceptions:true});if(response.getResponseCode()!==200)throw new Error('Google 登入已失效');const data=JSON.parse(response.getContentText());const props=PropertiesService.getScriptProperties();const clientId=props.getProperty('GOOGLE_CLIENT_ID');const adminEmail=expectedEmail||props.getProperty('ADMIN_EMAIL');if(clientId&&data.aud!==clientId)throw new Error('Google 登入來源不正確');if(!data.email_verified)throw new Error('Google 帳號尚未驗證');if(adminEmail&&String(data.email).toLowerCase()!==String(adminEmail).toLowerCase())throw new Error('此帳號不是 Admin');return data;}
+function verifyAdmin_(idToken,expectedEmail){if(!idToken)throw new Error('請使用 Admin Google 帳號登入');const props=PropertiesService.getScriptProperties();const clientId=props.getProperty('GOOGLE_CLIENT_ID');const configuredEmail=props.getProperty('ADMIN_EMAIL');if(!clientId||!configuredEmail)throw new Error('管理端尚未完成安全設定');const response=UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token='+encodeURIComponent(idToken),{muteHttpExceptions:true});if(response.getResponseCode()!==200)throw new Error('Google 登入已失效');const data=JSON.parse(response.getContentText());if(data.aud!==clientId)throw new Error('Google 登入來源不正確');if(!data.email_verified)throw new Error('Google 帳號尚未驗證');if(String(data.email).toLowerCase()!==String(configuredEmail).toLowerCase())throw new Error('此帳號不是 Admin');if(expectedEmail&&String(data.email).toLowerCase()!==String(expectedEmail).toLowerCase())throw new Error('此帳號不是本場婚宴的 Admin');return data;}
 function signToken_(payload){const props=PropertiesService.getScriptProperties();let secret=props.getProperty('SESSION_SECRET');if(!secret){secret=Utilities.getUuid()+Utilities.getUuid();props.setProperty('SESSION_SECRET',secret);}const body=Utilities.base64EncodeWebSafe(JSON.stringify(payload));const signature=Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(body,secret));return body+'.'+signature;}
 function verifyToken_(token,eventCode){const parts=String(token||'').split('.');if(parts.length!==2)throw new Error('請重新登入');const secret=PropertiesService.getScriptProperties().getProperty('SESSION_SECRET');const expected=Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(parts[0],secret));if(expected!==parts[1])throw new Error('登入憑證不正確');const data=JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString());if(data.eventCode!==eventCode||Date.now()>data.exp)throw new Error('登入已過期，請重新登入');return data;}
+function pinAttemptKey_(eventCode,role){return 'PIN_'+clean_(eventCode)+'_'+clean_(role);}
+function assertPinAllowed_(eventCode,role){const count=Number(CacheService.getScriptCache().get(pinAttemptKey_(eventCode,role))||0);if(count>=15)throw new Error('PIN 嘗試次數過多，請稍後再試或請 Admin 更新 PIN');}
+function recordPinFailure_(eventCode,role){const cache=CacheService.getScriptCache();const key=pinAttemptKey_(eventCode,role);const count=Number(cache.get(key)||0)+1;cache.put(key,String(count),600);}
+function clearPinFailures_(eventCode,role){CacheService.getScriptCache().remove(pinAttemptKey_(eventCode,role));}
 function uniqueCode_(){for(let i=0;i<20;i++){const code='W'+Math.random().toString(36).slice(2,7).toUpperCase();if(!PropertiesService.getScriptProperties().getProperty(EVENT_PREFIX+code))return code;}throw new Error('無法建立婚宴代碼，請再試一次');}
 function pin_(){return String(Math.floor(1000+Math.random()*9000));}
 function clean_(value){return String(value||'').trim();}
