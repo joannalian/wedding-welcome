@@ -25,6 +25,7 @@ export default function Home() {
   const [state, setState] = useState<AppState>(() => clone(initialState));
   const [screen, setScreen] = useState<Screen>('loading');
   const [ready, setReady] = useState(false);
+  const [loadingSlow, setLoadingSlow] = useState(false);
   const [sessionToken, setSessionToken] = useState('');
   const [adminIdentity, setAdminIdentity] = useState<AdminIdentity | null>(null);
   const [gateRole, setGateRole] = useState<'reception' | 'planner'>('reception');
@@ -46,6 +47,8 @@ export default function Home() {
   const [openingGuestId, setOpeningGuestId] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
   const remoteSnapshot = useRef('');
+  const writeInFlight = useRef(false);
+  const refreshInFlight = useRef(false);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -70,19 +73,28 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (ready) { setLoadingSlow(false); return; }
+    const timer = window.setTimeout(() => setLoadingSlow(true), 7000);
+    return () => window.clearTimeout(timer);
+  }, [ready]);
+
+  useEffect(() => {
     if (ready && screen === 'demo') localStorage.setItem(DEMO_STORAGE_KEY, JSON.stringify(state));
   }, [state, ready, screen]);
 
   useEffect(() => {
     if (screen !== 'app' || !hasCloudBackend() || !sessionToken || !state.settings.eventCode) return;
-    const refresh = () => {
-      if (document.visibilityState !== 'visible') return;
-      loadEvent(state.settings.eventCode, sessionToken).then((remote) => {
+    const refresh = async () => {
+      if (document.visibilityState !== 'visible' || writeInFlight.current || refreshInFlight.current) return;
+      refreshInFlight.current = true;
+      try {
+        const remote = await loadEvent(state.settings.eventCode, sessionToken);
         const serialized = JSON.stringify(remote);
         if (serialized !== remoteSnapshot.current) { remoteSnapshot.current = serialized; setState(remote); if (draft) setNotice('名單已有更新，返回列表後會使用最新資料'); }
-      }).catch(() => undefined);
+      } catch { /* background refresh will try again later */ }
+      finally { refreshInFlight.current = false; }
     };
-    const poll = window.setInterval(refresh, 4000);
+    const poll = window.setInterval(refresh, 12000);
     window.addEventListener('focus', refresh); document.addEventListener('visibilitychange', refresh);
     return () => { window.clearInterval(poll); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
   }, [sessionToken, state.settings.eventCode, draft, screen]);
@@ -197,12 +209,13 @@ export default function Home() {
       childChairActual: Math.min(draft.childChairActual || draft.childChairExpected, draft.actual), updatedAt: new Date().toISOString(),
     });
     setSavingGuest(true);
+    writeInFlight.current = true;
     try {
       if (isDemo) setState((current) => ({ ...current, guests: current.guests.map((guest) => guest.id === finished.id ? finished : guest) }));
       else { const result = await updateCloudGuest(state.settings.eventCode, finished, sessionToken); remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); }
       setNotice(`${finished.name} 已完成接待並同步`); closeGuest(); setQuery(''); setTab('reception');
     } catch (error) { setNotice(error instanceof Error ? error.message : '接待資料儲存失敗'); }
-    finally { setSavingGuest(false); }
+    finally { writeInFlight.current = false; setSavingGuest(false); }
   };
 
   const cancelReception = async (guest: GuestGroup) => {
@@ -214,12 +227,13 @@ export default function Home() {
       completed: false, completedAt: null, completedBy: '', updatedAt: new Date().toISOString(),
     });
     setSavingGuest(true);
+    writeInFlight.current = true;
     try {
       if (isDemo) setState((current) => ({ ...current, guests: current.guests.map((item) => item.id === guest.id ? cancelled : item) }));
       else { const result = await updateCloudGuest(state.settings.eventCode, cancelled, sessionToken); remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); }
       setNotice(`${guest.name} 已取消接待並同步`); closeGuest();
     } catch (error) { setNotice(error instanceof Error ? error.message : '無法取消接待'); }
-    finally { setSavingGuest(false); }
+    finally { writeInFlight.current = false; setSavingGuest(false); }
   };
 
   const handleImport = async (file: File) => {
@@ -235,7 +249,7 @@ export default function Home() {
   const handleGoogleSheet = async (url: string) => {
     setImportBusy(true); setImportFeedback({ tone:'info', text:'正在連線並讀取 Google Sheet，第一次可能需要數秒…' });
     try {
-      const result = await callCloud<{ title:string; sheetName:string; values:unknown[][]; rowCount:number }>('readGoogleSheet', { eventCode:state.settings.eventCode, token:sessionToken, url });
+      const result = await callCloud<{ title:string; sheetName:string; values:unknown[][]; rowCount:number }>('readGoogleSheet', { eventCode:state.settings.eventCode, token:sessionToken, url }, { retries:1, timeoutMs:20000 });
       const parsed = parseGuestMatrix(result.values);
       if (!parsed.guests.length) throw new Error('試算表中沒有找到賓客資料，請確認第一列欄位名稱');
       setImported(parsed); setSourceName(`${result.title}／${result.sheetName}`); setImportFeedback({ tone:'success', text:`讀取成功：${result.rowCount} 列資料整理為 ${parsed.guests.length} 組賓客。` });
@@ -246,19 +260,29 @@ export default function Home() {
   const applyImport = async () => {
     if (!imported) return;
     setImportBusy(true); setImportFeedback({ tone:'info', text:'正在安全合併並儲存至 Google Drive…' });
+    writeInFlight.current = true;
     try {
       const result = await applyCloudImport(state.settings.eventCode, imported.guests, sourceName, sessionToken);
       remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); setImported(null);
       const s = result.summary; setImportFeedback({ tone:'success', text:`匯入完成並已同步：新增 ${s.added}、更新 ${s.updated}、移除 ${s.removed}${s.retained ? `、保留已接待 ${s.retained}` : ''} 組。` });
     } catch (error) { setImportFeedback({ tone:'error', text:error instanceof Error ? error.message : '名單匯入失敗' }); }
-    finally { setImportBusy(false); }
+    finally { writeInFlight.current = false; setImportBusy(false); }
   };
 
   const saveAdminSettings = async (patch: Record<string, unknown>) => {
+    writeInFlight.current = true;
     try {
       const result = await updateCloudSettings(state.settings.eventCode, patch, sessionToken);
       remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); setNotice('設定已儲存並同步');
-    } catch (error) { setNotice(error instanceof Error ? error.message : '設定儲存失敗'); throw error; }
+    } catch (error) {
+      try {
+        const remote = await loadEvent(state.settings.eventCode, sessionToken);
+        const saved = Object.entries(patch).every(([key,value]) => remote.settings[key as keyof typeof remote.settings] === value);
+        remoteSnapshot.current = JSON.stringify(remote); setState(remote);
+        if (saved) { setNotice('設定已儲存並同步'); return; }
+      } catch { /* show the original write error below */ }
+      setNotice(error instanceof Error ? error.message : '設定儲存失敗'); throw error;
+    } finally { writeInFlight.current = false; }
   };
 
   const exportGiftCsv = () => {
@@ -273,12 +297,12 @@ export default function Home() {
     ? [{ key:'dashboard', label:'現場總覽' }]
     : [{ key:'reception', label:'接待賓客', count:waiting.length }, { key:'completed', label:'已接待', count:completed.length }, { key:'dashboard', label:'現場總覽' }, ...(!isDemo && role === 'admin' ? [{ key:'admin' as MainTab, label:'管理' }] : [])];
 
-  if (!ready) return <LoadingScreen />;
+  if (!ready) return <LoadingScreen slow={loadingSlow} onRetry={()=>location.reload()} />;
   if (screen === 'landing') return <EntryScreen onAdmin={()=>setScreen('admin-signin')} onDemo={enterDemo} />;
   if (screen === 'admin-signin') return <AdminSignIn message={cloudMessage} onBack={()=>setScreen('landing')} onAuthenticated={(identity)=>{ setAdminIdentity(identity); setScreen('admin-hub'); }} />;
   if (screen === 'admin-hub' && adminIdentity) return <AdminHub identity={adminIdentity} onOpen={openAdminEvent} onCreate={createAndOpenEvent} onBack={()=>{setAdminIdentity(null);setScreen('landing');}} />;
   if (screen === 'staff-gate') return <StaffGate eventCode={gateEventCode} role={gateRole} message={cloudMessage} onBack={()=>{replaceQuery();setScreen('landing');}} onLogin={activateSession} />;
-  if (screen !== 'demo' && screen !== 'app') return <LoadingScreen />;
+  if (screen !== 'demo' && screen !== 'app') return <LoadingScreen slow={loadingSlow} onRetry={()=>location.reload()} />;
   if (!state.settings.receptionOpen && role !== 'admin') return <ClosedScreen eventName={state.settings.eventName} />;
 
   return (
@@ -398,7 +422,7 @@ function GuestDataTable({guests,compact=false}:{guests:GuestGroup[];compact?:boo
 
 function Empty({title,copy}:{title:string;copy:string}) { return <div className="empty"><span aria-hidden="true">○</span><h3>{title}</h3><p>{copy}</p></div>; }
 function ClosedScreen({eventName}:{eventName:string}) { return <main className="closed-screen"><div><p className="eyebrow">{eventName}</p><h1>好日子迎賓</h1><span>本場婚宴接待已關閉</span><p>如需查看資料，請由 Admin 登入報表。</p></div></main>; }
-function LoadingScreen() { return <main className="closed-screen"><div><p className="eyebrow">正在準備</p><h1>好日子迎賓</h1><span>載入婚宴資料中…</span></div></main>; }
+function LoadingScreen({slow,onRetry}:{slow:boolean;onRetry:()=>void}) { return <main className="closed-screen"><div><p className="eyebrow">正在準備</p><h1>好日子迎賓</h1><span>{slow?'Google 回應較慢，仍在重新連線…':'載入婚宴資料中…'}</span>{slow&&<><p>婚宴資料仍保存在 Google Drive，不會因載入較慢而消失。</p><button className="secondary loading-retry" type="button" onClick={onRetry}>重新連線</button></>}</div></main>; }
 
 function EntryScreen({onAdmin,onDemo}:{onAdmin:()=>void;onDemo:()=>void}) {
   return <main className="entry-screen"><section className="entry-card"><div className="entry-brand"><span aria-hidden="true">囍</span><p className="eyebrow">婚宴當日接待</p><h1>好日子迎賓</h1><p>先選擇要管理正式婚宴，或使用虛構資料看看操作方式。</p></div><div className="entry-choices"><button className="entry-choice admin-choice" type="button" onClick={onAdmin}><span>管理</span><div><h2>管理我的婚宴</h2><p>使用 Google 帳號建立婚宴、匯入名單與分享工作人員入口。</p></div><i aria-hidden="true">›</i></button><button className="entry-choice demo-choice" type="button" onClick={onDemo}><span>示範</span><div><h2>查看示範</h2><p>只使用虛構賓客與本機資料，不會連接 Google Drive。</p></div><i aria-hidden="true">›</i></button></div><small className="privacy-note">正式資料只會在管理者登入並選定婚宴後載入；工作人員不會取得 Google Drive 權限。<br/><a href="privacy.html">查看隱私權說明</a></small></section></main>;
