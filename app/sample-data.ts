@@ -3,19 +3,26 @@ import type { AppState, GuestGroup } from './model';
 const now = new Date().toISOString();
 
 function guest(input: Partial<GuestGroup> & Pick<GuestGroup, 'id' | 'name' | 'category' | 'expected' | 'tables'>): GuestGroup {
-  return {
+  const item = {
     phone: '', actual: 0, vegetarianExpected: 0, vegetarianActual: 0,
     childChairExpected: 0, childChairActual: 0, cakeType: '不需喜餅', cakePlanned: 0,
-    cakeDelivered: 0, cakeOwed: 0, giftReceived: false, bagNamed: false,
+    cakeDelivered: 0, cakeOwed: 0, cakeChinesePlanned: 0, cakeChineseDelivered: 0,
+    cakeChineseOwed: 0, cakeWesternPlanned: 0, cakeWesternDelivered: 0, cakeWesternOwed: 0,
+    giftReceived: false, bagNamed: false,
     giftName: '', giftAmount: null, note: '', completed: false,
     completedAt: null, completedBy: '', updatedAt: now, ...input,
-  };
+  } as GuestGroup;
+  if (!item.cakeChinesePlanned && item.cakeType.includes('中式')) item.cakeChinesePlanned = item.cakePlanned;
+  if (!item.cakeWesternPlanned && item.cakeType.includes('西式')) item.cakeWesternPlanned = item.cakePlanned;
+  return item;
 }
 
 export const initialState: AppState = {
   settings: {
     eventName: '好日子示範婚宴', eventCode: 'DEMO-2026', receptionOpen: true,
-    cakeStock: 38, receptionPin: '0824', plannerPin: '5200', plannerEnabled: true,
+    cakeStock: 38, cakeStockChinese: 12, cakeStockWestern: 26,
+    receptionPin: '0824', plannerPin: '5200',
+    revision: 1, importSource: '虛構示範名單.xlsx', importedAt: '2026-08-24T08:00:00.000Z',
     operator: '示範管理員', role: 'admin',
   },
   guests: [

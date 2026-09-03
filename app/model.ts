@@ -20,6 +20,12 @@ export type GuestGroup = {
   cakePlanned: number;
   cakeDelivered: number;
   cakeOwed: number;
+  cakeChinesePlanned: number;
+  cakeChineseDelivered: number;
+  cakeChineseOwed: number;
+  cakeWesternPlanned: number;
+  cakeWesternDelivered: number;
+  cakeWesternOwed: number;
   giftReceived: boolean;
   bagNamed: boolean;
   giftName: string;
@@ -36,11 +42,15 @@ export type EventSettings = {
   eventCode: string;
   receptionOpen: boolean;
   cakeStock: number;
+  cakeStockChinese: number;
+  cakeStockWestern: number;
   receptionPin: string;
   plannerPin: string;
-  plannerEnabled: boolean;
   operator: string;
   role: Role;
+  revision: number;
+  importSource: string;
+  importedAt: string | null;
 };
 
 export type AppState = {

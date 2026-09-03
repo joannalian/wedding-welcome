@@ -3,6 +3,20 @@ import { makeId } from './model';
 
 type Row = Record<string, unknown>;
 
+export type ImportDiagnostics = {
+  headers: string[];
+  recognizedHeaders: string[];
+  unknownHeaders: string[];
+  warnings: string[];
+};
+
+export type ParsedImport = { guests: GuestGroup[]; diagnostics: ImportDiagnostics };
+
+const recognizedHeaderNames = new Set([
+  '原始群組','賓客','群組','姓名','分類','電話','預計人數','應到人數','應到','桌次',
+  '素食','兒童座椅','中式喜餅數量（群組合計）','中式喜餅','西式喜餅數量（群組合計）','西式喜餅','備註',
+]);
+
 const truthy = (value: unknown) => /^(1|是|有|需要|素食|兒童椅|true|v)$/i.test(String(value ?? '').trim());
 const num = (value: unknown) => {
   const matched = String(value ?? '').match(/-?\d+(?:\.\d+)?/);
@@ -42,6 +56,8 @@ export function rowsToGuests(rows: Row[]): GuestGroup[] {
       childChairActual: 0,
       tables: [...tableCount].map(([table, planned]) => ({ table, planned })),
       cakeType, cakePlanned: chinese + western, cakeDelivered: 0, cakeOwed: 0,
+      cakeChinesePlanned: chinese, cakeChineseDelivered: 0, cakeChineseOwed: 0,
+      cakeWesternPlanned: western, cakeWesternDelivered: 0, cakeWesternOwed: 0,
       giftReceived: false, bagNamed: false, giftName: '', giftAmount: null,
       note: members.map((row) => text(row['備註'])).find(Boolean) || '',
       completed: false, completedAt: null, completedBy: '', updatedAt: now,
@@ -52,6 +68,23 @@ export function rowsToGuests(rows: Row[]): GuestGroup[] {
 export function matrixToGuests(matrix: unknown[][]) {
   const [headers = [], ...body] = matrix;
   return rowsToGuests(body.map((cells) => Object.fromEntries(headers.map((header, index) => [String(header ?? '').trim(), cells[index] ?? '']))));
+}
+
+export function parseGuestMatrix(matrix: unknown[][]): ParsedImport {
+  const [rawHeaders = [], ...body] = matrix;
+  const headers = rawHeaders.map((header) => String(header ?? '').trim()).filter(Boolean);
+  const guests = rowsToGuests(body.map((cells) => Object.fromEntries(rawHeaders.map((header, index) => [String(header ?? '').trim(), cells[index] ?? '']))));
+  const recognizedHeaders = headers.filter((header) => recognizedHeaderNames.has(header));
+  const unknownHeaders = headers.filter((header) => !recognizedHeaderNames.has(header));
+  const hasAny = (...names: string[]) => names.some((name) => headers.includes(name));
+  const warnings: string[] = [];
+  if (!hasAny('原始群組','賓客','群組','姓名')) warnings.push('未辨識賓客名稱欄位');
+  if (!hasAny('桌次')) warnings.push('未辨識桌次欄位，賓客會暫列為待安排');
+  if (!hasAny('預計人數','應到人數','應到')) warnings.push('未辨識應到人數欄位，將依資料列數估算');
+  if (!hasAny('中式喜餅數量（群組合計）','中式喜餅')) warnings.push('未辨識中式喜餅欄位，數量將以 0 匯入');
+  if (!hasAny('西式喜餅數量（群組合計）','西式喜餅')) warnings.push('未辨識西式喜餅欄位，數量將以 0 匯入');
+  if (unknownHeaders.length) warnings.push(`有 ${unknownHeaders.length} 個欄位未套用：${unknownHeaders.join('、')}`);
+  return { guests, diagnostics: { headers, recognizedHeaders, unknownHeaders, warnings } };
 }
 
 export async function readExcelFile(file: File) {
@@ -72,12 +105,12 @@ export async function readExcelFile(file: File) {
       return values;
     };
     const [headers, ...body] = lines.map(parseLine);
-    return rowsToGuests(body.map((cells) => Object.fromEntries(headers.map((header, index) => [header.trim(), cells[index] ?? '']))));
+    return parseGuestMatrix([headers, ...body]);
   }
   const readXlsxFile = (await import('read-excel-file/browser')).default;
   const sheets = await readXlsxFile(file);
   const matrix = Array.isArray(sheets) && sheets[0] && 'data' in sheets[0] ? sheets[0].data : sheets;
-  return matrixToGuests(matrix as unknown[][]);
+  return parseGuestMatrix(matrix as unknown[][]);
 }
 
 export function importSummary(current: GuestGroup[], incoming: GuestGroup[]) {

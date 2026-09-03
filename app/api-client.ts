@@ -35,6 +35,22 @@ export async function loginAdminEvent(eventCode: string, googleIdToken: string) 
   return callCloud<{ token: string; state: AppState }>('login', { eventCode, role: 'admin', googleIdToken });
 }
 
-export async function createAdminEvent(eventName: string, cakeStock: number, googleIdToken: string) {
-  return callCloud<{ state: AppState; folderUrl: string; spreadsheetUrl: string }>('createEvent', { eventName, cakeStock, googleIdToken });
+export async function createAdminEvent(eventName: string, googleIdToken: string) {
+  return callCloud<{ state: AppState; folderUrl: string; spreadsheetUrl: string }>('createEvent', { eventName, googleIdToken });
+}
+
+export async function getEventInfo(eventCode: string) {
+  return callCloud<{ eventName: string; eventCode: string; receptionOpen: boolean }>('eventInfo', { eventCode });
+}
+
+export async function updateCloudGuest(eventCode: string, guest: AppState['guests'][number], token: string) {
+  return callCloud<{ state: AppState }>('updateGuest', { eventCode, guest, token });
+}
+
+export async function applyCloudImport(eventCode: string, guests: AppState['guests'], sourceName: string, token: string) {
+  return callCloud<{ state: AppState; summary: { added: number; updated: number; removed: number; retained: number } }>('applyImport', { eventCode, guests, sourceName, token });
+}
+
+export async function updateCloudSettings(eventCode: string, patch: Record<string, unknown>, token: string) {
+  return callCloud<{ state: AppState }>('updateSettings', { eventCode, patch, token });
 }
