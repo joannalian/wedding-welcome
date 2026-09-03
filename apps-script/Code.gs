@@ -1,167 +1,42 @@
-/** 好日子迎賓 — Google Apps Script backend
- * Deploy as Web App: execute as owner, access anyone.
- * Set Script Properties: GOOGLE_CLIENT_ID and ADMIN_EMAIL.
- */
-const EVENT_PREFIX = 'EVENT_';
-const SHEETS = { SETTINGS: '婚宴設定', GUESTS: '賓客名單', AUDIT: '異動紀錄' };
-const GUEST_HEADERS = ['id','賓客','分類','電話','應到','實到','素食應到','素食實到','兒童椅應到','兒童椅實到','桌次配置JSON','喜餅種類','喜餅原定','喜餅已領','欠餅','已收到紅包','袋上有編號或姓名','紅包編號','禮金金額','備註','已完成接待','完成時間','接待人員','更新時間'];
+/** 好日子迎賓 — Google Apps Script backend. Deploy as owner, access anyone. */
+const EVENT_PREFIX='EVENT_';
+const SHEETS={SETTINGS:'婚宴設定',GUESTS:'賓客名單',AUDIT:'異動紀錄'};
+const GUEST_HEADERS=['id','賓客','分類','電話','應到','實到','素食應到','素食實到','兒童椅應到','兒童椅實到','桌次配置JSON','中式喜餅原定','中式喜餅已領','中式欠餅','西式喜餅原定','西式喜餅已領','西式欠餅','已收到紅包','袋上有編號或姓名','紅包編號','禮金金額','備註','已完成接待','完成時間','接待人員','更新時間'];
 
-function doGet() {
-  return json_({ ok: true, data: { service: '好日子迎賓', status: 'ready' } });
-}
+function doGet(){return json_({ok:true,data:{service:'好日子迎賓',status:'ready'}});}
+function doPost(e){try{const i=JSON.parse((e&&e.postData&&e.postData.contents)||'{}');const r={listEvents:listEvents_,createEvent:createEvent_,eventInfo:eventInfo_,login:login_,loadEvent:loadEvent_,updateGuest:updateGuest_,applyImport:applyImport_,updateSettings:updateSettings_,saveEvent:saveEvent_,readGoogleSheet:readGoogleSheet_,closeReception:closeReception_,health:()=>({service:'好日子迎賓'})};if(!r[i.action])throw new Error('不支援的操作');return json_({ok:true,data:r[i.action](i)});}catch(error){return json_({ok:false,error:String(error&&error.message||error)});}}
 
-function doPost(e) {
-  try {
-    const input = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    const routes = {
-      listEvents: listEvents_, createEvent: createEvent_, login: login_, loadEvent: loadEvent_, saveEvent: saveEvent_,
-      readGoogleSheet: readGoogleSheet_, closeReception: closeReception_, health: () => ({ service: '好日子迎賓' }),
-    };
-    if (!routes[input.action]) throw new Error('不支援的操作');
-    return json_({ ok: true, data: routes[input.action](input) });
-  } catch (error) {
-    return json_({ ok: false, error: String(error && error.message || error) });
-  }
-}
+function createEvent_(i){const admin=verifyAdmin_(i.googleIdToken),eventName=clean_(i.eventName);if(!eventName)throw new Error('請填寫婚宴名稱');const eventCode=uniqueCode_(),folder=DriveApp.createFolder(`${eventName}_${eventCode}`),book=SpreadsheetApp.create(`${eventName}_${eventCode}_好日子迎賓`);DriveApp.getFileById(book.getId()).moveTo(folder);book.getSheets()[0].setName(SHEETS.SETTINGS);const guests=book.insertSheet(SHEETS.GUESTS);guests.getRange(1,1,1,GUEST_HEADERS.length).setValues([GUEST_HEADERS]);guests.setFrozenRows(1);const audit=book.insertSheet(SHEETS.AUDIT);audit.getRange(1,1,1,6).setValues([['時間','角色','操作人員','動作','賓客ID','內容']]);audit.setFrozenRows(1);const state={settings:{eventName,eventCode,receptionOpen:true,cakeStock:0,cakeStockChinese:0,cakeStockWestern:0,receptionPin:pin_(),plannerPin:pin_(),operator:admin.email,role:'admin',revision:Date.now(),importSource:'',importedAt:null},guests:[]};writeState_(book,state);PropertiesService.getScriptProperties().setProperty(EVENT_PREFIX+eventCode,JSON.stringify({spreadsheetId:book.getId(),folderId:folder.getId(),adminEmail:admin.email,createdAt:new Date().toISOString()}));audit_(book,'admin',admin.email,'建立婚宴','',eventName);return{state,folderUrl:folder.getUrl(),spreadsheetUrl:book.getUrl()};}
+function listEvents_(i){const admin=verifyAdmin_(i.googleIdToken),p=PropertiesService.getScriptProperties().getProperties();const events=Object.keys(p).filter(k=>k.indexOf(EVENT_PREFIX)===0).map(k=>{const eventCode=k.slice(EVENT_PREFIX.length),record=parseJson_(p[k],null);if(!record||String(record.adminEmail).toLowerCase()!==String(admin.email).toLowerCase())return null;try{const state=readState_(SpreadsheetApp.openById(record.spreadsheetId));return{eventName:state.settings.eventName,eventCode,receptionOpen:state.settings.receptionOpen,guestCount:state.guests.length,completedCount:state.guests.filter(g=>g.completed).length,updatedAt:new Date(state.settings.revision||0).toISOString()};}catch(_){return null;}}).filter(Boolean).sort((a,b)=>String(b.updatedAt||'').localeCompare(String(a.updatedAt||'')));return{adminEmail:admin.email,events};}
+function eventInfo_(i){const e=eventRecord_(i.eventCode),s=readState_(SpreadsheetApp.openById(e.spreadsheetId));return{eventName:s.settings.eventName,eventCode:s.settings.eventCode,receptionOpen:s.settings.receptionOpen};}
+function login_(i){const e=eventRecord_(i.eventCode),s=readState_(SpreadsheetApp.openById(e.spreadsheetId)),role=i.role;if(role==='admin'){const a=verifyAdmin_(i.googleIdToken,e.adminEmail);return{token:signToken_({eventCode:i.eventCode,role:'admin',name:a.email,exp:Date.now()+43200000}),role:'admin',state:setRole_(s,'admin',a.email)};}if(!s.settings.receptionOpen)throw new Error('本場婚宴接待已關閉');if(!['planner','reception'].includes(role))throw new Error('角色不正確');assertPinAllowed_(i.eventCode,role);if(role==='planner'&&String(i.pin)!==String(s.settings.plannerPin)){recordPinFailure_(i.eventCode,role);throw new Error('婚顧 PIN 不正確');}if(role==='reception'&&String(i.pin)!==String(s.settings.receptionPin)){recordPinFailure_(i.eventCode,role);throw new Error('接待 PIN 不正確');}clearPinFailures_(i.eventCode,role);const name=clean_(i.operator)||(role==='planner'?'婚顧':'接待人員');return{token:signToken_({eventCode:i.eventCode,role,name,exp:Date.now()+43200000}),role,state:setRole_(s,role,name)};}
+function loadEvent_(i){const session=verifyToken_(i.token,i.eventCode),e=eventRecord_(i.eventCode),s=readState_(SpreadsheetApp.openById(e.spreadsheetId));if(!s.settings.receptionOpen&&session.role!=='admin')throw new Error('本場婚宴接待已關閉');return setRole_(s,session.role,session.name);}
 
-function createEvent_(input) {
-  const admin = verifyAdmin_(input.googleIdToken);
-  const eventName = clean_(input.eventName);
-  if (!eventName) throw new Error('請填寫婚宴名稱');
-  const eventCode = uniqueCode_();
-  const folder = DriveApp.createFolder(`${eventName}_${eventCode}`);
-  const book = SpreadsheetApp.create(`${eventName}_${eventCode}_好日子迎賓`);
-  DriveApp.getFileById(book.getId()).moveTo(folder);
-  const settings = book.getSheets()[0]; settings.setName(SHEETS.SETTINGS);
-  const guests = book.insertSheet(SHEETS.GUESTS); guests.getRange(1,1,1,GUEST_HEADERS.length).setValues([GUEST_HEADERS]); guests.setFrozenRows(1);
-  const audit = book.insertSheet(SHEETS.AUDIT); audit.getRange(1,1,1,6).setValues([['時間','角色','操作人員','動作','賓客ID','內容']]); audit.setFrozenRows(1);
-  const state = {
-    settings: { eventName, eventCode, receptionOpen:true, cakeStock:Number(input.cakeStock)||0, receptionPin:pin_(), plannerPin:pin_(), plannerEnabled:true, operator:admin.email, role:'admin' },
-    guests: [],
-  };
-  writeState_(book, state);
-  PropertiesService.getScriptProperties().setProperty(EVENT_PREFIX + eventCode, JSON.stringify({ spreadsheetId:book.getId(), folderId:folder.getId(), adminEmail:admin.email, createdAt:new Date().toISOString() }));
-  audit_(book, 'admin', admin.email, '建立婚宴', '', eventName);
-  return { state, folderUrl:folder.getUrl(), spreadsheetUrl:book.getUrl() };
-}
+function updateGuest_(i){const session=verifyToken_(i.token,i.eventCode);if(session.role==='planner')throw new Error('婚顧為唯讀權限');const e=eventRecord_(i.eventCode),lock=LockService.getScriptLock();lock.waitLock(20000);try{const book=SpreadsheetApp.openById(e.spreadsheetId),s=readState_(book);if(!s.settings.receptionOpen&&session.role!=='admin')throw new Error('本場婚宴接待已關閉');const index=s.guests.findIndex(g=>g.id===clean_(i.guest&&i.guest.id));if(index<0)throw new Error('這位賓客已不在最新名單，請重新整理');const before=s.guests[index],after=mergeOperational_(before,i.guest,session.name);s.guests[index]=after;touch_(s);writeState_(book,s);const action=!before.completed&&after.completed?'完成接待':before.completed&&!after.completed?'取消接待':'修改接待';audit_(book,session.role,session.name,action,after.id,auditGuestDetail_(before,after));return{state:setRole_(s,session.role,session.name)};}finally{lock.releaseLock();}}
+function applyImport_(i){const session=verifyToken_(i.token,i.eventCode);if(session.role!=='admin')throw new Error('只有 Admin 可以重新匯入');const e=eventRecord_(i.eventCode),lock=LockService.getScriptLock();lock.waitLock(20000);try{const book=SpreadsheetApp.openById(e.spreadsheetId),s=readState_(book),incoming=Array.isArray(i.guests)?i.guests:[];if(!incoming.length)throw new Error('沒有可匯入的賓客資料');const current=new Map(s.guests.map(g=>[g.id,g])),seen={},next=[];let added=0,updated=0,removed=0,retained=0;incoming.forEach(raw=>{const source=normalizeImported_(raw),old=current.get(source.id);seen[source.id]=true;if(!old){next.push(source);added++;return;}next.push(mergeImported_(old,source));if(JSON.stringify(sourceFields_(old))!==JSON.stringify(sourceFields_(source)))updated++;});s.guests.forEach(old=>{if(seen[old.id])return;if(old.completed){next.push(old);retained++;}else removed++;});s.guests=next;s.settings.importSource=clean_(i.sourceName)||'未命名來源';s.settings.importedAt=new Date().toISOString();touch_(s);writeState_(book,s);const detail=`來源：${s.settings.importSource}｜新增 ${added}｜更新 ${updated}｜移除 ${removed}｜保留已接待 ${retained}`;audit_(book,'admin',session.name,'重新匯入名單','',detail);return{state:setRole_(s,'admin',session.name),summary:{added,updated,removed,retained}};}finally{lock.releaseLock();}}
+function updateSettings_(i){const session=verifyToken_(i.token,i.eventCode);if(session.role!=='admin')throw new Error('只有 Admin 可以修改設定');const e=eventRecord_(i.eventCode),lock=LockService.getScriptLock();lock.waitLock(20000);try{const book=SpreadsheetApp.openById(e.spreadsheetId),s=readState_(book),p=i.patch||{},changes=[];if(Object.prototype.hasOwnProperty.call(p,'eventName')){const name=clean_(p.eventName);if(!name)throw new Error('婚宴名稱不能空白');if(name!==s.settings.eventName)changes.push(`婚宴名稱：${s.settings.eventName} → ${name}`);s.settings.eventName=name;}['cakeStockChinese','cakeStockWestern'].forEach(key=>{if(Object.prototype.hasOwnProperty.call(p,key)){const value=Math.max(0,Number(p[key])||0);if(value!==s.settings[key])changes.push(`${key==='cakeStockChinese'?'中式':'西式'}喜餅庫存：${s.settings[key]} → ${value}`);s.settings[key]=value;}});if(Object.prototype.hasOwnProperty.call(p,'receptionOpen')){const open=Boolean(p.receptionOpen);if(open!==s.settings.receptionOpen)changes.push(open?'重新開放接待':'關閉接待');s.settings.receptionOpen=open;}touch_(s);writeState_(book,s);audit_(book,'admin',session.name,'修改婚宴設定','',changes.join('｜')||'未變更');return{state:setRole_(s,'admin',session.name)};}finally{lock.releaseLock();}}
 
-function listEvents_(input) {
-  const admin = verifyAdmin_(input.googleIdToken);
-  const properties = PropertiesService.getScriptProperties().getProperties();
-  const events = Object.keys(properties).filter(key => key.indexOf(EVENT_PREFIX) === 0).map(key => {
-    const eventCode = key.slice(EVENT_PREFIX.length);
-    const record = parseJson_(properties[key], null);
-    if (!record || String(record.adminEmail).toLowerCase() !== String(admin.email).toLowerCase()) return null;
-    try {
-      const book = SpreadsheetApp.openById(record.spreadsheetId);
-      const state = readState_(book);
-      const updatedCell = book.getSheetByName(SHEETS.SETTINGS).getRange(8,2).getValue();
-      return {
-        eventName:state.settings.eventName, eventCode, receptionOpen:state.settings.receptionOpen,
-        guestCount:state.guests.length, completedCount:state.guests.filter(guest => guest.completed).length,
-        updatedAt:dateIso_(updatedCell),
-      };
-    } catch (_) { return null; }
-  }).filter(Boolean).sort((a,b) => String(b.updatedAt||'').localeCompare(String(a.updatedAt||'')));
-  return { adminEmail:admin.email, events };
-}
+// Compatibility for already-open older pages: merge only operational fields, never replace the master list.
+function saveEvent_(i){const session=verifyToken_(i.token,i.eventCode);if(session.role==='planner')throw new Error('婚顧為唯讀權限');const e=eventRecord_(i.eventCode),lock=LockService.getScriptLock();lock.waitLock(20000);try{const book=SpreadsheetApp.openById(e.spreadsheetId),s=readState_(book),sent=i.state||{},byId=new Map((sent.guests||[]).map(g=>[g.id,g]));s.guests=s.guests.map(old=>byId.has(old.id)?mergeOperational_(old,byId.get(old.id),session.name):old);if(session.role==='admin'&&sent.settings){if(clean_(sent.settings.eventName))s.settings.eventName=clean_(sent.settings.eventName);s.settings.receptionOpen=Boolean(sent.settings.receptionOpen);}touch_(s);writeState_(book,s);return{revision:s.settings.revision};}finally{lock.releaseLock();}}
+function readGoogleSheet_(i){const session=verifyToken_(i.token,i.eventCode);if(session.role!=='admin')throw new Error('只有 Admin 可以重新匯入');let book;try{book=SpreadsheetApp.openByUrl(clean_(i.url));}catch(_){throw new Error('無法開啟這份 Google Sheet，請確認網址及 Admin 是否有權限');}const sheet=book.getSheets()[0],range=sheet.getDataRange();return{title:book.getName(),sheetName:sheet.getName(),values:range.getDisplayValues(),rowCount:Math.max(0,range.getNumRows()-1)};}
+function closeReception_(i){return updateSettings_({eventCode:i.eventCode,token:i.token,patch:{receptionOpen:Boolean(i.open)}});}
 
-function login_(input) {
-  const event = eventRecord_(input.eventCode);
-  const state = readState_(SpreadsheetApp.openById(event.spreadsheetId));
-  const role = input.role;
-  if (role === 'admin') {
-    const admin = verifyAdmin_(input.googleIdToken, event.adminEmail);
-    return { token:signToken_({ eventCode:input.eventCode, role:'admin', name:admin.email, exp:Date.now()+12*60*60*1000 }), role:'admin', state:setRole_(state,'admin',admin.email) };
-  }
-  if (!state.settings.receptionOpen) throw new Error('本場婚宴接待已關閉');
-  if (!['planner','reception'].includes(role)) throw new Error('角色不正確');
-  assertPinAllowed_(input.eventCode, role);
-  if (role === 'planner' && (!state.settings.plannerEnabled || String(input.pin)!==String(state.settings.plannerPin))) { recordPinFailure_(input.eventCode,role); throw new Error('婚顧 PIN 不正確'); }
-  if (role === 'reception' && String(input.pin)!==String(state.settings.receptionPin)) { recordPinFailure_(input.eventCode,role); throw new Error('接待 PIN 不正確'); }
-  clearPinFailures_(input.eventCode,role);
-  const name = clean_(input.operator) || (role === 'planner' ? '婚顧' : '接待人員');
-  return { token:signToken_({ eventCode:input.eventCode, role, name, exp:Date.now()+12*60*60*1000 }), role, state:setRole_(state,role,name) };
-}
+function readState_(book){const ss=book.getSheetByName(SHEETS.SETTINGS),rows=ss.getDataRange().getValues(),map={};rows.forEach(r=>map[r[0]]=r[1]);const gs=book.getSheetByName(SHEETS.GUESTS),values=gs.getDataRange().getValues(),headers=(values[0]||[]).map(String),hm={};headers.forEach((h,j)=>hm[h]=j);const val=(row,names,fallback='')=>{for(let j=0;j<names.length;j++){const index=hm[names[j]];if(index!==undefined&&row[index]!==''&&row[index]!==null)return row[index];}return fallback;};const guests=values.slice(1).filter(row=>val(row,['id'])).map(row=>{const lt=String(val(row,['喜餅種類'],'不需喜餅')),lp=Number(val(row,['喜餅原定'],0))||0,ld=Number(val(row,['喜餅已領'],0))||0,lo=Number(val(row,['欠餅'],0))||0;let cp=Number(val(row,['中式喜餅原定'],NaN)),wp=Number(val(row,['西式喜餅原定'],NaN));if(isNaN(cp))cp=lt.indexOf('中式')>=0?(lt.indexOf('西式')>=0?Math.min(1,lp):lp):0;if(isNaN(wp))wp=lt.indexOf('西式')>=0?(lt.indexOf('中式')>=0?Math.max(0,lp-cp):lp):0;const cd=Number(val(row,['中式喜餅已領'],lt.indexOf('中式')>=0?Math.min(cp,ld):0))||0,wd=Number(val(row,['西式喜餅已領'],lt.indexOf('西式')>=0?Math.max(0,ld-cd):0))||0,co=Number(val(row,['中式欠餅'],lt.indexOf('中式')>=0?Math.min(cp,lo):0))||0,wo=Number(val(row,['西式欠餅'],lt.indexOf('西式')>=0?Math.max(0,lo-co):0))||0;return normalizeLegacy_({id:String(val(row,['id'])),name:String(val(row,['賓客'])),category:String(val(row,['分類'])),phone:String(val(row,['電話'])),expected:Number(val(row,['應到'],0))||0,actual:Number(val(row,['實到'],0))||0,vegetarianExpected:Number(val(row,['素食應到'],0))||0,vegetarianActual:Number(val(row,['素食實到'],0))||0,childChairExpected:Number(val(row,['兒童椅應到'],0))||0,childChairActual:Number(val(row,['兒童椅實到'],0))||0,tables:parseJson_(val(row,['桌次配置JSON'],'[]'),[]),cakeChinesePlanned:cp,cakeChineseDelivered:cd,cakeChineseOwed:co,cakeWesternPlanned:wp,cakeWesternDelivered:wd,cakeWesternOwed:wo,giftReceived:Boolean(val(row,['已收到紅包'],false)),bagNamed:Boolean(val(row,['袋上有編號或姓名'],false)),giftName:String(val(row,['紅包編號'],'')),giftAmount:val(row,['禮金金額'],'')===''?null:Number(val(row,['禮金金額'],0)),note:String(val(row,['備註'],'')),completed:Boolean(val(row,['已完成接待'],false)),completedAt:dateIso_(val(row,['完成時間'],'')),completedBy:String(val(row,['接待人員'],'')),updatedAt:dateIso_(val(row,['更新時間'],''))||new Date().toISOString()});});const chinese=Number(map.cakeStockChinese)||0,western=map.cakeStockWestern===''||map.cakeStockWestern==null?Number(map.cakeStock)||0:Number(map.cakeStockWestern)||0;return{settings:{eventName:String(map.eventName||''),eventCode:String(map.eventCode||''),receptionOpen:String(map.receptionOpen)!=='false',cakeStock:chinese+western,cakeStockChinese:chinese,cakeStockWestern:western,receptionPin:String(map.receptionPin||''),plannerPin:String(map.plannerPin||''),operator:'',role:'admin',revision:Number(map.revision)||new Date(map.updatedAt||0).getTime()||0,importSource:String(map.importSource||''),importedAt:dateIso_(map.importedAt)},guests};}
+function writeState_(book,state){let sheet=book.getSheetByName(SHEETS.SETTINGS),s=state.settings;sheet.clear();sheet.getRange(1,1,11,2).setValues([['eventName',s.eventName],['eventCode',s.eventCode],['receptionOpen',s.receptionOpen],['cakeStockChinese',s.cakeStockChinese||0],['cakeStockWestern',s.cakeStockWestern||0],['receptionPin',s.receptionPin],['plannerPin',s.plannerPin],['revision',s.revision||Date.now()],['importSource',s.importSource||''],['importedAt',s.importedAt||''],['updatedAt',new Date()]]);sheet.autoResizeColumns(1,2);sheet=book.getSheetByName(SHEETS.GUESTS);const data=state.guests.map(raw=>{const g=normalizeLegacy_(raw);return[g.id,g.name,g.category,g.phone,g.expected,g.actual,g.vegetarianExpected,g.vegetarianActual,g.childChairExpected,g.childChairActual,JSON.stringify(g.tables||[]),g.cakeChinesePlanned,g.cakeChineseDelivered,g.cakeChineseOwed,g.cakeWesternPlanned,g.cakeWesternDelivered,g.cakeWesternOwed,g.giftReceived,g.bagNamed,g.giftName,g.giftAmount==null?'':g.giftAmount,g.note,g.completed,g.completedAt||'',g.completedBy,g.updatedAt];});sheet.clearContents();sheet.getRange(1,1,1,GUEST_HEADERS.length).setValues([GUEST_HEADERS]);if(data.length)sheet.getRange(2,1,data.length,GUEST_HEADERS.length).setValues(data);sheet.setFrozenRows(1);}
 
-function loadEvent_(input) {
-  const session = verifyToken_(input.token, input.eventCode);
-  const event = eventRecord_(input.eventCode);
-  const state = readState_(SpreadsheetApp.openById(event.spreadsheetId));
-  if (!state.settings.receptionOpen && session.role !== 'admin') throw new Error('本場婚宴接待已關閉');
-  return setRole_(state, session.role, session.name);
-}
-
-function saveEvent_(input) {
-  const session = verifyToken_(input.token, input.eventCode);
-  if (session.role === 'planner') throw new Error('婚顧為唯讀權限');
-  const event = eventRecord_(input.eventCode);
-  const lock = LockService.getScriptLock(); lock.waitLock(20000);
-  try {
-    const book = SpreadsheetApp.openById(event.spreadsheetId);
-    const current = readState_(book);
-    if (!current.settings.receptionOpen && session.role !== 'admin') throw new Error('本場婚宴接待已關閉');
-    const next = input.state;
-    next.settings.eventCode = input.eventCode;
-    next.settings.role = session.role; next.settings.operator = session.name;
-    if (session.role !== 'admin') {
-      next.settings.eventName=current.settings.eventName; next.settings.receptionOpen=current.settings.receptionOpen;
-      next.settings.cakeStock=current.settings.cakeStock; next.settings.receptionPin=current.settings.receptionPin;
-      next.settings.plannerPin=current.settings.plannerPin; next.settings.plannerEnabled=current.settings.plannerEnabled;
-    }
-    writeState_(book,next); audit_(book,session.role,session.name,'儲存接待資料','',`${next.guests.length} 組`);
-    return { revision:Date.now() };
-  } finally { lock.releaseLock(); }
-}
-
-function readGoogleSheet_(input) {
-  const session = verifyToken_(input.token,input.eventCode);
-  if (session.role !== 'admin') throw new Error('只有 Admin 可以重新匯入');
-  const book = SpreadsheetApp.openByUrl(input.url);
-  const values = book.getSheets()[0].getDataRange().getDisplayValues();
-  return { title:book.getName(), values };
-}
-
-function closeReception_(input) {
-  const session = verifyToken_(input.token,input.eventCode);
-  if (session.role !== 'admin') throw new Error('只有 Admin 可以關閉接待');
-  const event = eventRecord_(input.eventCode); const book=SpreadsheetApp.openById(event.spreadsheetId); const state=readState_(book);
-  state.settings.receptionOpen=Boolean(input.open); writeState_(book,state); audit_(book,'admin',session.name,input.open?'重新開放接待':'關閉接待','','');
-  return { receptionOpen:state.settings.receptionOpen };
-}
-
-function readState_(book) {
-  const settingsSheet=book.getSheetByName(SHEETS.SETTINGS); const rows=settingsSheet.getDataRange().getValues(); const map={}; rows.forEach(row=>map[row[0]]=row[1]);
-  const guestSheet=book.getSheetByName(SHEETS.GUESTS); const values=guestSheet.getDataRange().getValues(); const guests=values.slice(1).filter(row=>row[0]).map(row=>({
-    id:String(row[0]),name:String(row[1]),category:String(row[2]),phone:String(row[3]),expected:Number(row[4])||0,actual:Number(row[5])||0,
-    vegetarianExpected:Number(row[6])||0,vegetarianActual:Number(row[7])||0,childChairExpected:Number(row[8])||0,childChairActual:Number(row[9])||0,
-    tables:parseJson_(row[10],[]),cakeType:String(row[11]||'不需喜餅'),cakePlanned:Number(row[12])||0,cakeDelivered:Number(row[13])||0,cakeOwed:Number(row[14])||0,
-    giftReceived:Boolean(row[15]),bagNamed:Boolean(row[16]),giftName:String(row[17]||''),giftAmount:row[18]===''?null:Number(row[18]),note:String(row[19]||''),
-    completed:Boolean(row[20]),completedAt:dateIso_(row[21]),completedBy:String(row[22]||''),updatedAt:dateIso_(row[23])||new Date().toISOString(),
-  }));
-  return {settings:{eventName:String(map.eventName||''),eventCode:String(map.eventCode||''),receptionOpen:String(map.receptionOpen)!=='false',cakeStock:Number(map.cakeStock)||0,receptionPin:String(map.receptionPin||''),plannerPin:String(map.plannerPin||''),plannerEnabled:String(map.plannerEnabled)!=='false',operator:'',role:'admin'},guests};
-}
-
-function writeState_(book,state) {
-  let sheet=book.getSheetByName(SHEETS.SETTINGS); sheet.clear(); const s=state.settings;
-  sheet.getRange(1,1,8,2).setValues([['eventName',s.eventName],['eventCode',s.eventCode],['receptionOpen',s.receptionOpen],['cakeStock',s.cakeStock],['receptionPin',s.receptionPin],['plannerPin',s.plannerPin],['plannerEnabled',s.plannerEnabled],['updatedAt',new Date()]]); sheet.autoResizeColumns(1,2);
-  sheet=book.getSheetByName(SHEETS.GUESTS); const rows=state.guests.map(g=>[g.id,g.name,g.category,g.phone,g.expected,g.actual,g.vegetarianExpected,g.vegetarianActual,g.childChairExpected,g.childChairActual,JSON.stringify(g.tables||[]),g.cakeType,g.cakePlanned,g.cakeDelivered,g.cakeOwed,g.giftReceived,g.bagNamed,g.giftName,g.giftAmount==null?'':g.giftAmount,g.note,g.completed,g.completedAt||'',g.completedBy,g.updatedAt]);
-  sheet.clearContents(); sheet.getRange(1,1,1,GUEST_HEADERS.length).setValues([GUEST_HEADERS]); if(rows.length) sheet.getRange(2,1,rows.length,GUEST_HEADERS.length).setValues(rows); sheet.setFrozenRows(1);
-}
-
-function setRole_(state,role,name){state.settings.role=role;state.settings.operator=name;if(role==='planner'){state.guests=state.guests.map(g=>Object.assign({},g,{phone:'',giftAmount:null,giftName:'',note:'',giftReceived:false,bagNamed:false}));}return state;}
+function normalizeImported_(r){const now=new Date().toISOString(),cp=Math.max(0,Number(r.cakeChinesePlanned)||0),wp=Math.max(0,Number(r.cakeWesternPlanned)||0);return normalizeLegacy_({id:clean_(r.id),name:clean_(r.name),category:clean_(r.category)||'未分類',phone:clean_(r.phone),expected:Math.max(0,Number(r.expected)||0),actual:0,vegetarianExpected:Math.max(0,Number(r.vegetarianExpected)||0),vegetarianActual:0,childChairExpected:Math.max(0,Number(r.childChairExpected)||0),childChairActual:0,tables:Array.isArray(r.tables)?r.tables:[],cakeChinesePlanned:cp,cakeChineseDelivered:0,cakeChineseOwed:0,cakeWesternPlanned:wp,cakeWesternDelivered:0,cakeWesternOwed:0,giftReceived:false,bagNamed:false,giftName:'',giftAmount:null,note:clean_(r.note),completed:false,completedAt:null,completedBy:'',updatedAt:now});}
+function sourceFields_(g){return{name:g.name,category:g.category,phone:g.phone,expected:g.expected,vegetarianExpected:g.vegetarianExpected,childChairExpected:g.childChairExpected,tables:g.tables,cakeChinesePlanned:g.cakeChinesePlanned,cakeWesternPlanned:g.cakeWesternPlanned};}
+function mergeImported_(old,source){const next=Object.assign({},old,sourceFields_(source));next.cakeChineseOwed=old.completed?Math.max(0,next.cakeChinesePlanned-old.cakeChineseDelivered):0;next.cakeWesternOwed=old.completed?Math.max(0,next.cakeWesternPlanned-old.cakeWesternDelivered):0;next.updatedAt=new Date().toISOString();return normalizeLegacy_(next);}
+function mergeOperational_(old,incoming,name){const keys=['actual','vegetarianActual','childChairActual','cakeChineseDelivered','cakeChineseOwed','cakeWesternDelivered','cakeWesternOwed','giftReceived','bagNamed','giftName','giftAmount','note','completed','completedAt'],next=Object.assign({},old);keys.forEach(key=>{if(Object.prototype.hasOwnProperty.call(incoming||{},key))next[key]=incoming[key];});next.completedBy=next.completed?name:'';next.updatedAt=new Date().toISOString();return normalizeLegacy_(next);}
+function normalizeLegacy_(g){g.cakeChinesePlanned=Math.max(0,Number(g.cakeChinesePlanned)||0);g.cakeChineseDelivered=Math.max(0,Number(g.cakeChineseDelivered)||0);g.cakeChineseOwed=Math.max(0,Number(g.cakeChineseOwed)||0);g.cakeWesternPlanned=Math.max(0,Number(g.cakeWesternPlanned)||0);g.cakeWesternDelivered=Math.max(0,Number(g.cakeWesternDelivered)||0);g.cakeWesternOwed=Math.max(0,Number(g.cakeWesternOwed)||0);g.cakePlanned=g.cakeChinesePlanned+g.cakeWesternPlanned;g.cakeDelivered=g.cakeChineseDelivered+g.cakeWesternDelivered;g.cakeOwed=g.cakeChineseOwed+g.cakeWesternOwed;g.cakeType=g.cakeChinesePlanned&&g.cakeWesternPlanned?'中式與西式喜餅':g.cakeChinesePlanned?'中式喜餅':g.cakeWesternPlanned?'西式喜餅':'不需喜餅';return g;}
+function auditGuestDetail_(before,after){const p=[`賓客：${after.name}`,`實到 ${before.actual||0}→${after.actual||0}`];if(before.giftReceived!==after.giftReceived)p.push(after.giftReceived?'已收紅包':'取消紅包');if(before.cakeChineseDelivered!==after.cakeChineseDelivered)p.push(`中式喜餅 ${before.cakeChineseDelivered||0}→${after.cakeChineseDelivered||0}`);if(before.cakeWesternDelivered!==after.cakeWesternDelivered)p.push(`西式喜餅 ${before.cakeWesternDelivered||0}→${after.cakeWesternDelivered||0}`);return p.join('｜');}
+function touch_(s){s.settings.revision=Date.now();s.settings.cakeStock=(s.settings.cakeStockChinese||0)+(s.settings.cakeStockWestern||0);}
+function setRole_(s,role,name){s.settings.role=role;s.settings.operator=name;if(role==='planner')s.guests=s.guests.map(g=>Object.assign({},g,{phone:'',giftAmount:null,giftName:'',note:'',giftReceived:false,bagNamed:false}));return s;}
 function audit_(book,role,name,action,guestId,detail){book.getSheetByName(SHEETS.AUDIT).appendRow([new Date(),role,name,action,guestId,detail]);}
 function eventRecord_(code){const raw=PropertiesService.getScriptProperties().getProperty(EVENT_PREFIX+clean_(code));if(!raw)throw new Error('找不到婚宴代碼');return JSON.parse(raw);}
-function verifyAdmin_(idToken,expectedEmail){if(!idToken)throw new Error('請使用 Admin Google 帳號登入');const props=PropertiesService.getScriptProperties();const clientId=props.getProperty('GOOGLE_CLIENT_ID');const configuredEmail=props.getProperty('ADMIN_EMAIL');if(!clientId||!configuredEmail)throw new Error('管理端尚未完成安全設定');const response=UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token='+encodeURIComponent(idToken),{muteHttpExceptions:true});if(response.getResponseCode()!==200)throw new Error('Google 登入已失效');const data=JSON.parse(response.getContentText());if(data.aud!==clientId)throw new Error('Google 登入來源不正確');if(!data.email_verified)throw new Error('Google 帳號尚未驗證');if(String(data.email).toLowerCase()!==String(configuredEmail).toLowerCase())throw new Error('此帳號不是 Admin');if(expectedEmail&&String(data.email).toLowerCase()!==String(expectedEmail).toLowerCase())throw new Error('此帳號不是本場婚宴的 Admin');return data;}
-function signToken_(payload){const props=PropertiesService.getScriptProperties();let secret=props.getProperty('SESSION_SECRET');if(!secret){secret=Utilities.getUuid()+Utilities.getUuid();props.setProperty('SESSION_SECRET',secret);}const body=Utilities.base64EncodeWebSafe(JSON.stringify(payload));const signature=Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(body,secret));return body+'.'+signature;}
-function verifyToken_(token,eventCode){const parts=String(token||'').split('.');if(parts.length!==2)throw new Error('請重新登入');const secret=PropertiesService.getScriptProperties().getProperty('SESSION_SECRET');const expected=Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(parts[0],secret));if(expected!==parts[1])throw new Error('登入憑證不正確');const data=JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString());if(data.eventCode!==eventCode||Date.now()>data.exp)throw new Error('登入已過期，請重新登入');return data;}
-function pinAttemptKey_(eventCode,role){return 'PIN_'+clean_(eventCode)+'_'+clean_(role);}
-function assertPinAllowed_(eventCode,role){const count=Number(CacheService.getScriptCache().get(pinAttemptKey_(eventCode,role))||0);if(count>=15)throw new Error('PIN 嘗試次數過多，請稍後再試或請 Admin 更新 PIN');}
-function recordPinFailure_(eventCode,role){const cache=CacheService.getScriptCache();const key=pinAttemptKey_(eventCode,role);const count=Number(cache.get(key)||0)+1;cache.put(key,String(count),600);}
-function clearPinFailures_(eventCode,role){CacheService.getScriptCache().remove(pinAttemptKey_(eventCode,role));}
+function verifyAdmin_(token,email){if(!token)throw new Error('請使用 Admin Google 帳號登入');const p=PropertiesService.getScriptProperties(),client=p.getProperty('GOOGLE_CLIENT_ID'),configured=p.getProperty('ADMIN_EMAIL');if(!client||!configured)throw new Error('管理端尚未完成安全設定');const response=UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token='+encodeURIComponent(token),{muteHttpExceptions:true});if(response.getResponseCode()!==200)throw new Error('Google 登入已失效');const data=JSON.parse(response.getContentText());if(data.aud!==client)throw new Error('Google 登入來源不正確');if(!data.email_verified)throw new Error('Google 帳號尚未驗證');if(String(data.email).toLowerCase()!==String(configured).toLowerCase())throw new Error('此帳號不是 Admin');if(email&&String(data.email).toLowerCase()!==String(email).toLowerCase())throw new Error('此帳號不是本場婚宴的 Admin');return data;}
+function signToken_(payload){const p=PropertiesService.getScriptProperties();let secret=p.getProperty('SESSION_SECRET');if(!secret){secret=Utilities.getUuid()+Utilities.getUuid();p.setProperty('SESSION_SECRET',secret);}const bytes=Utilities.newBlob(JSON.stringify(payload),'application/json').getBytes(),body=Utilities.base64EncodeWebSafe(bytes),signature=Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(body,secret));return body+'.'+signature;}
+function verifyToken_(token,eventCode){const parts=String(token||'').split('.');if(parts.length!==2)throw new Error('請重新登入');const secret=PropertiesService.getScriptProperties().getProperty('SESSION_SECRET');if(!secret)throw new Error('請重新登入');const expected=Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(parts[0],secret));if(expected!==parts[1])throw new Error('登入憑證不正確');const bytes=Utilities.base64DecodeWebSafe(parts[0]),data=JSON.parse(Utilities.newBlob(bytes,'application/json').getDataAsString('UTF-8'));if(data.eventCode!==eventCode||Date.now()>data.exp)throw new Error('登入已過期，請重新登入');return data;}
+function pinAttemptKey_(code,role){return'PIN_'+clean_(code)+'_'+clean_(role);}function assertPinAllowed_(code,role){if(Number(CacheService.getScriptCache().get(pinAttemptKey_(code,role))||0)>=15)throw new Error('PIN 嘗試次數過多，請稍後再試或請 Admin 更新 PIN');}function recordPinFailure_(code,role){const c=CacheService.getScriptCache(),k=pinAttemptKey_(code,role);c.put(k,String(Number(c.get(k)||0)+1),600);}function clearPinFailures_(code,role){CacheService.getScriptCache().remove(pinAttemptKey_(code,role));}
 function uniqueCode_(){for(let i=0;i<20;i++){const code='W'+Math.random().toString(36).slice(2,7).toUpperCase();if(!PropertiesService.getScriptProperties().getProperty(EVENT_PREFIX+code))return code;}throw new Error('無法建立婚宴代碼，請再試一次');}
-function pin_(){return String(Math.floor(1000+Math.random()*9000));}
-function clean_(value){return String(value||'').trim();}
-function parseJson_(value,fallback){try{return JSON.parse(value);}catch(_){return fallback;}}
-function dateIso_(value){if(!value)return null;const date=value instanceof Date?value:new Date(value);return isNaN(date.getTime())?String(value):date.toISOString();}
-function json_(body){return ContentService.createTextOutput(JSON.stringify(body)).setMimeType(ContentService.MimeType.JSON);}
+function pin_(){return String(Math.floor(1000+Math.random()*9000));}function clean_(v){return String(v||'').trim();}function parseJson_(v,f){try{return JSON.parse(v);}catch(_){return f;}}function dateIso_(v){if(!v)return null;const d=v instanceof Date?v:new Date(v);return isNaN(d.getTime())?String(v):d.toISOString();}function json_(b){return ContentService.createTextOutput(JSON.stringify(b)).setMimeType(ContentService.MimeType.JSON);}
