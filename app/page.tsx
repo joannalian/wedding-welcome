@@ -327,8 +327,8 @@ export default function Home() {
   };
 
   const exportGiftCsv = () => {
-    const header = ['賓客','分類','紅包編號','禮金金額','袋上有編號或姓名','備註','接待人員','完成時間'];
-    const rows = completed.map((guest) => [guest.name,guest.category,guest.giftName,guest.giftAmount ?? '',guest.bagNamed?'是':'否',guest.note,guest.completedBy,guest.completedAt || '']);
+    const header = ['賓客','分類','已收到紅包','紅包編號','禮金金額','袋上有編號或姓名','備註','接待人員','完成時間'];
+    const rows = completed.map((guest) => [guest.name,guest.category,guest.giftReceived?'是':'否',guest.giftName,guest.giftAmount ?? '',guest.bagNamed?'是':'否',guest.note,guest.completedBy,guest.completedAt || '']);
     const escape = (value: unknown) => `"${String(value ?? '').replaceAll('"','""')}"`;
     const blob = new Blob(['\ufeff' + [header,...rows].map((row) => row.map(escape).join(',')).join('\r\n')], { type:'text/csv;charset=utf-8' });
     const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${state.settings.eventName}_禮金紀錄.csv`; link.click(); URL.revokeObjectURL(link.href);
