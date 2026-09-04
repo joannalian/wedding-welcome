@@ -60,6 +60,10 @@ export async function loadEvent(eventCode: string, token: string) {
   return callCloud<AppState>('loadEvent', { eventCode, token }, { retries: 1, timeoutMs: 12000 });
 }
 
+export async function getCloudRevision(eventCode: string, token: string) {
+  return callCloud<{ revision: number; receptionOpen: boolean }>('getRevision', { eventCode, token }, { retries: 1, timeoutMs: 8000 });
+}
+
 export async function saveEvent(state: AppState, token: string) {
   return callCloud<{ revision: number }>('saveEvent', { eventCode: state.settings.eventCode, token, state });
 }
@@ -80,8 +84,8 @@ export async function getEventInfo(eventCode: string) {
   return callCloud<{ eventName: string; eventCode: string; receptionOpen: boolean }>('eventInfo', { eventCode }, { retries: 1, timeoutMs: 12000 });
 }
 
-export async function updateCloudGuest(eventCode: string, guest: AppState['guests'][number], token: string) {
-  return callCloud<{ state: AppState }>('updateGuest', { eventCode, guest, token });
+export async function updateCloudGuest(eventCode: string, guest: AppState['guests'][number], token: string, baseUpdatedAt: string) {
+  return callCloud<{ state: AppState }>('updateGuest', { eventCode, guest, baseUpdatedAt, token });
 }
 
 export async function applyCloudImport(eventCode: string, guests: AppState['guests'], sourceName: string, token: string) {

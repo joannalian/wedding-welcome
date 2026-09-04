@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { applyCloudImport, callCloud, createAdminEvent, getEventInfo, hasCloudBackend, listAdminEvents, loadEvent, loginAdminEvent, updateCloudGuest, updateCloudSettings } from './api-client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { applyCloudImport, callCloud, createAdminEvent, getCloudRevision, getEventInfo, hasCloudBackend, listAdminEvents, loadEvent, loginAdminEvent, updateCloudGuest, updateCloudSettings } from './api-client';
 import { importSummary, parseGuestMatrix, readExcelFile, type ImportDiagnostics } from './import-tools';
 import { allocateActual, deriveStatus, formatTables, maskPhone, statusText, type AppState, type EventSummary, type GuestGroup, type MainTab, type Role } from './model';
 import { googleClientId } from './public-config';
@@ -18,6 +18,7 @@ const syncCakeTotals = (guest: GuestGroup): GuestGroup => {
   return { ...guest, cakePlanned, cakeDelivered, cakeOwed, cakeType };
 };
 type Screen = 'loading' | 'landing' | 'admin-signin' | 'admin-hub' | 'staff-gate' | 'demo' | 'app';
+type SyncStatus = 'synced' | 'syncing' | 'error';
 type AdminIdentity = { idToken: string; email: string; events: EventSummary[] };
 type ImportedPayload = { guests: GuestGroup[]; diagnostics: ImportDiagnostics };
 
@@ -45,10 +46,43 @@ export default function Home() {
   const [importFeedback, setImportFeedback] = useState<{ tone:'success'|'error'|'info'; text:string } | null>(null);
   const [savingGuest, setSavingGuest] = useState(false);
   const [openingGuestId, setOpeningGuestId] = useState('');
+  const [draftBaseUpdatedAt, setDraftBaseUpdatedAt] = useState('');
+  const [conflictMessage, setConflictMessage] = useState('');
+  const [saveError, setSaveError] = useState('');
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('synced');
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const remoteSnapshot = useRef('');
   const writeInFlight = useRef(false);
   const refreshInFlight = useRef(false);
+
+  const markSynced = () => { setSyncStatus('synced'); setLastSyncedAt(Date.now()); };
+
+  const refreshEvent = useCallback(async (showFeedback=false) => {
+    if (screen !== 'app' || !hasCloudBackend() || !sessionToken || !state.settings.eventCode || writeInFlight.current || refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    if (showFeedback) setSyncStatus('syncing');
+    try {
+      const heartbeat = await getCloudRevision(state.settings.eventCode, sessionToken);
+      if (!heartbeat.receptionOpen && state.settings.role !== 'admin') {
+        setState((current)=>({...current,settings:{...current.settings,receptionOpen:false,revision:heartbeat.revision}}));
+        markSynced(); return;
+      }
+      if (heartbeat.revision !== state.settings.revision) {
+        const remote = await loadEvent(state.settings.eventCode, sessionToken);
+        remoteSnapshot.current = JSON.stringify(remote); setState(remote);
+        if (draft) {
+          const latest = remote.guests.find((guest)=>guest.id===draft.id);
+          if (latest && latest.updatedAt !== draftBaseUpdatedAt) setConflictMessage(`這筆資料剛剛已由「${latest.completedBy||'其他接待人員'}」更新，請先載入最新資料。`);
+        }
+      }
+      markSynced();
+      if (showFeedback) setNotice('已取得最新資料');
+    } catch (error) {
+      setSyncStatus('error');
+      if (showFeedback) setNotice(error instanceof Error ? error.message : '目前無法同步，請稍後重試');
+    } finally { refreshInFlight.current = false; }
+  }, [draft, draftBaseUpdatedAt, screen, sessionToken, state.settings.eventCode, state.settings.revision, state.settings.role]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -63,7 +97,7 @@ export default function Home() {
       queueMicrotask(()=>{ if (eventCode && (directRole === 'reception' || directRole === 'planner')) { setGateEventCode(eventCode); setGateRole(directRole); setScreen('staff-gate'); } else setScreen('landing'); setReady(true); }); return;
     }
     loadEvent(eventCode, token).then((remote) => {
-      remoteSnapshot.current = JSON.stringify(remote); setState(remote); setSessionToken(token); setScreen('app'); setReady(true);
+      remoteSnapshot.current = JSON.stringify(remote); setState(remote); setSessionToken(token); setScreen('app'); markSynced(); setReady(true);
     }).catch((error) => {
       setCloudMessage(error instanceof Error ? error.message : '請重新登入');
       if (eventCode && (directRole === 'reception' || directRole === 'planner')) { setGateEventCode(eventCode); setGateRole(directRole); setScreen('staff-gate'); }
@@ -73,7 +107,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (ready) { setLoadingSlow(false); return; }
+    if (ready) return;
     const timer = window.setTimeout(() => setLoadingSlow(true), 7000);
     return () => window.clearTimeout(timer);
   }, [ready]);
@@ -84,20 +118,11 @@ export default function Home() {
 
   useEffect(() => {
     if (screen !== 'app' || !hasCloudBackend() || !sessionToken || !state.settings.eventCode) return;
-    const refresh = async () => {
-      if (document.visibilityState !== 'visible' || writeInFlight.current || refreshInFlight.current) return;
-      refreshInFlight.current = true;
-      try {
-        const remote = await loadEvent(state.settings.eventCode, sessionToken);
-        const serialized = JSON.stringify(remote);
-        if (serialized !== remoteSnapshot.current) { remoteSnapshot.current = serialized; setState(remote); if (draft) setNotice('名單已有更新，返回列表後會使用最新資料'); }
-      } catch { /* background refresh will try again later */ }
-      finally { refreshInFlight.current = false; }
-    };
+    const refresh = () => { if (document.visibilityState === 'visible') void refreshEvent(false); };
     const poll = window.setInterval(refresh, 12000);
     window.addEventListener('focus', refresh); document.addEventListener('visibilitychange', refresh);
     return () => { window.clearInterval(poll); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
-  }, [sessionToken, state.settings.eventCode, draft, screen]);
+  }, [refreshEvent, sessionToken, state.settings.eventCode, screen]);
 
   useEffect(() => {
     if (!notice) return;
@@ -131,7 +156,7 @@ export default function Home() {
   };
 
   const activateSession = (token: string, remote: AppState) => {
-    remoteSnapshot.current = JSON.stringify(remote); setSessionToken(token); setState(remote); setScreen('app'); setTab(remote.settings.role === 'planner' ? 'dashboard' : remote.settings.role === 'admin' ? 'admin' : 'reception');
+    remoteSnapshot.current = JSON.stringify(remote); setSessionToken(token); setState(remote); setScreen('app'); markSynced(); setTab(remote.settings.role === 'planner' ? 'dashboard' : remote.settings.role === 'admin' ? 'admin' : 'reception');
     const params = new URLSearchParams({ event:remote.settings.eventCode });
     if (remote.settings.role !== 'admin') params.set('role', remote.settings.role);
     sessionStorage.setItem(`hao-ri-zi-token-${remote.settings.eventCode}`, token); replaceQuery(params);
@@ -153,18 +178,29 @@ export default function Home() {
     if (!isDemo && sessionToken) {
       setOpeningGuestId(guest.id);
       try {
+        setSyncStatus('syncing');
         const remote = await loadEvent(state.settings.eventCode, sessionToken);
-        remoteSnapshot.current = JSON.stringify(remote); setState(remote);
+        remoteSnapshot.current = JSON.stringify(remote); setState(remote); markSynced();
         currentGuest = remote.guests.find((item) => item.id === guest.id) || guest;
-      } catch (error) { setNotice(error instanceof Error ? error.message : '無法取得最新賓客資料'); setOpeningGuestId(''); return; }
+      } catch (error) { setSyncStatus('error'); setNotice(error instanceof Error ? error.message : '無法取得最新賓客資料'); setOpeningGuestId(''); return; }
       setOpeningGuestId('');
     }
     const next = clone(currentGuest);
     if (next.giftName === next.name) next.giftName = '';
-    setDraft(next); setStep(1); setEditingAttendance(false); setEditingCake(false); window.scrollTo({ top: 0, behavior: 'smooth' });
+    setDraft(next); setDraftBaseUpdatedAt(currentGuest.updatedAt); setConflictMessage(''); setSaveError(''); setStep(1); setEditingAttendance(false); setEditingCake(false); window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const closeGuest = () => { setDraft(null); setStep(1); };
+  const closeGuest = () => { setDraft(null); setDraftBaseUpdatedAt(''); setConflictMessage(''); setSaveError(''); setStep(1); };
+
+  const reloadDraft = async () => {
+    if (!draft || !sessionToken) return;
+    setSyncStatus('syncing');
+    try {
+      const remote=await loadEvent(state.settings.eventCode,sessionToken), latest=remote.guests.find((guest)=>guest.id===draft.id);
+      if (!latest) throw new Error('這位賓客已不在最新名單');
+      remoteSnapshot.current=JSON.stringify(remote); setState(remote); setDraft(clone(latest)); setDraftBaseUpdatedAt(latest.updatedAt); setConflictMessage(''); setSaveError(''); setStep(1); markSynced(); setNotice('已載入最新接待資料，請重新確認');
+    } catch(error) { setSyncStatus('error'); setSaveError(error instanceof Error?error.message:'無法載入最新資料'); }
+  };
 
   const setDraftValue = <K extends keyof GuestGroup>(key: K, value: GuestGroup[K]) => setDraft((current) => {
     if (!current) return current;
@@ -208,31 +244,36 @@ export default function Home() {
       vegetarianActual: Math.min(draft.vegetarianActual || draft.vegetarianExpected, draft.actual),
       childChairActual: Math.min(draft.childChairActual || draft.childChairExpected, draft.actual), updatedAt: new Date().toISOString(),
     });
-    setSavingGuest(true);
+    setSavingGuest(true); setSaveError(''); setConflictMessage(''); setSyncStatus('syncing');
     writeInFlight.current = true;
     try {
       if (isDemo) setState((current) => ({ ...current, guests: current.guests.map((guest) => guest.id === finished.id ? finished : guest) }));
-      else { const result = await updateCloudGuest(state.settings.eventCode, finished, sessionToken); remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); }
+      else { const result = await updateCloudGuest(state.settings.eventCode, finished, sessionToken, draftBaseUpdatedAt); remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); }
+      markSynced();
       setNotice(`${finished.name} 已完成接待並同步`); closeGuest(); setQuery(''); setTab('reception');
-    } catch (error) { setNotice(error instanceof Error ? error.message : '接待資料儲存失敗'); }
+    } catch (error) {
+      const message=error instanceof Error ? error.message : '接待資料儲存失敗';
+      if (message.includes('剛剛已由')) { setConflictMessage(message); setSyncStatus('synced'); }
+      else { setSaveError(`${message}。目前填寫內容仍保留在畫面上，請確認連線後重新送出。`); setSyncStatus('error'); }
+    }
     finally { writeInFlight.current = false; setSavingGuest(false); }
   };
 
   const cancelReception = async (guest: GuestGroup) => {
-    if (!window.confirm(`要取消「${guest.name}」的已接待狀態嗎？`)) return;
+    if (!window.confirm(`確定要清除「${guest.name}」的整筆接待紀錄嗎？\n\n將清除實到人數、紅包、禮金、喜餅領取、備註與接待人員。此操作無法在網頁上復原。`)) return;
     const cancelled = syncCakeTotals({
       ...guest, actual: 0, vegetarianActual: 0, childChairActual: 0, cakeDelivered: 0, cakeOwed: 0,
       cakeChineseDelivered: 0, cakeChineseOwed: 0, cakeWesternDelivered: 0, cakeWesternOwed: 0,
       giftReceived: false, bagNamed: false, giftName: '', giftAmount: null, note: '',
       completed: false, completedAt: null, completedBy: '', updatedAt: new Date().toISOString(),
     });
-    setSavingGuest(true);
+    setSavingGuest(true); setSyncStatus('syncing');
     writeInFlight.current = true;
     try {
       if (isDemo) setState((current) => ({ ...current, guests: current.guests.map((item) => item.id === guest.id ? cancelled : item) }));
-      else { const result = await updateCloudGuest(state.settings.eventCode, cancelled, sessionToken); remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); }
-      setNotice(`${guest.name} 已取消接待並同步`); closeGuest();
-    } catch (error) { setNotice(error instanceof Error ? error.message : '無法取消接待'); }
+      else { const result = await updateCloudGuest(state.settings.eventCode, cancelled, sessionToken, guest.updatedAt); remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); }
+      markSynced(); setNotice(`${guest.name} 的接待紀錄已清除並同步`); closeGuest();
+    } catch (error) { const message=error instanceof Error ? error.message : '無法清除接待紀錄'; setNotice(message); setSyncStatus(message.includes('剛剛已由')?'synced':'error'); }
     finally { writeInFlight.current = false; setSavingGuest(false); }
   };
 
@@ -259,29 +300,29 @@ export default function Home() {
 
   const applyImport = async () => {
     if (!imported) return;
-    setImportBusy(true); setImportFeedback({ tone:'info', text:'正在安全合併並儲存至 Google Drive…' });
+    setImportBusy(true); setSyncStatus('syncing'); setImportFeedback({ tone:'info', text:'正在安全合併並儲存至 Google Drive…' });
     writeInFlight.current = true;
     try {
       const result = await applyCloudImport(state.settings.eventCode, imported.guests, sourceName, sessionToken);
-      remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); setImported(null);
+      remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); setImported(null); markSynced();
       const s = result.summary; setImportFeedback({ tone:'success', text:`匯入完成並已同步：新增 ${s.added}、更新 ${s.updated}、移除 ${s.removed}${s.retained ? `、保留已接待 ${s.retained}` : ''} 組。` });
-    } catch (error) { setImportFeedback({ tone:'error', text:error instanceof Error ? error.message : '名單匯入失敗' }); }
+    } catch (error) { setSyncStatus('error'); setImportFeedback({ tone:'error', text:error instanceof Error ? error.message : '名單匯入失敗' }); }
     finally { writeInFlight.current = false; setImportBusy(false); }
   };
 
   const saveAdminSettings = async (patch: Record<string, unknown>) => {
-    writeInFlight.current = true;
+    writeInFlight.current = true; setSyncStatus('syncing');
     try {
       const result = await updateCloudSettings(state.settings.eventCode, patch, sessionToken);
-      remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); setNotice('設定已儲存並同步');
+      remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); markSynced(); setNotice('設定已儲存並同步');
     } catch (error) {
       try {
         const remote = await loadEvent(state.settings.eventCode, sessionToken);
         const saved = Object.entries(patch).every(([key,value]) => remote.settings[key as keyof typeof remote.settings] === value);
         remoteSnapshot.current = JSON.stringify(remote); setState(remote);
-        if (saved) { setNotice('設定已儲存並同步'); return; }
+        if (saved) { markSynced(); setNotice('設定已儲存並同步'); return; }
       } catch { /* show the original write error below */ }
-      setNotice(error instanceof Error ? error.message : '設定儲存失敗'); throw error;
+      setSyncStatus('error'); setNotice(error instanceof Error ? error.message : '設定儲存失敗'); throw error;
     } finally { writeInFlight.current = false; }
   };
 
@@ -291,6 +332,14 @@ export default function Home() {
     const escape = (value: unknown) => `"${String(value ?? '').replaceAll('"','""')}"`;
     const blob = new Blob(['\ufeff' + [header,...rows].map((row) => row.map(escape).join(',')).join('\r\n')], { type:'text/csv;charset=utf-8' });
     const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${state.settings.eventName}_禮金紀錄.csv`; link.click(); URL.revokeObjectURL(link.href);
+  };
+
+  const exportReceptionCsv = () => {
+    const header=['賓客','分類','電話','桌次','應到','實到','素食應到','素食實到','兒童椅應到','兒童椅實到','中式喜餅應發','中式喜餅已發','中式欠餅','西式喜餅應發','西式喜餅已發','西式欠餅','收到紅包','紅包編號','禮金金額','袋上有編號或姓名','備註','接待狀態','接待人員','完成時間','最後更新'];
+    const rows=state.guests.map((guest)=>[guest.name,guest.category,guest.phone,formatTables(guest),guest.expected,guest.actual,guest.vegetarianExpected,guest.vegetarianActual,guest.childChairExpected,guest.childChairActual,guest.cakeChinesePlanned,guest.cakeChineseDelivered,guest.cakeChineseOwed,guest.cakeWesternPlanned,guest.cakeWesternDelivered,guest.cakeWesternOwed,guest.giftReceived?'是':'否',guest.giftName,guest.giftAmount??'',guest.bagNamed?'是':'否',guest.note,guest.completed?'已接待':'未接待',guest.completedBy,guest.completedAt||'',guest.updatedAt]);
+    const escape=(value:unknown)=>`"${String(value??'').replaceAll('"','""')}"`;
+    const blob=new Blob(['\ufeff'+[header,...rows].map(row=>row.map(escape).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'});
+    const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`${state.settings.eventName}_完整接待紀錄.csv`;link.click();URL.revokeObjectURL(link.href);
   };
 
   const tabs: { key: MainTab; label: string; count?: number }[] = role === 'planner'
@@ -310,7 +359,7 @@ export default function Home() {
       <header className="topbar">
         <div><p className="eyebrow">{state.settings.eventName}</p><h1>好日子迎賓</h1></div>
         <div className="top-actions">
-          <span className={`sync ${!isDemo ? 'online' : ''}`}><i />{isDemo ? '虛構示範資料' : '已連接 Google Drive'}</span>
+          <button className={`sync ${isDemo?'demo':syncStatus}`} type="button" disabled={isDemo||syncStatus==='syncing'} onClick={()=>void refreshEvent(true)} aria-label={isDemo?'虛構示範資料':'重新同步婚宴資料'}><i /><span className="sync-long">{isDemo?'虛構示範資料':syncStatus==='syncing'?'同步中…':syncStatus==='error'?'連線不穩・點此重試':`已同步${lastSyncedAt?`・${new Date(lastSyncedAt).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'})}`:''}`}</span><span className="sync-short">{isDemo?'示範':syncStatus==='syncing'?'同步中':syncStatus==='error'?'同步失敗':'已同步'}</span></button>
           <button className="operator" type="button" onClick={() => role === 'admin' && setTab('admin')}>{role === 'admin' ? 'Admin' : role === 'planner' ? '婚顧' : '接待'}・{state.settings.operator}</button>
           <button className="top-exit" type="button" onClick={returnHome}>{isDemo ? '離開示範' : role === 'admin' ? '切換婚宴' : '離開'}</button>
         </div>
@@ -324,9 +373,9 @@ export default function Home() {
 
       {tab === 'reception' && !draft && <GuestBrowser query={query} setQuery={setQuery} guests={candidates} hiddenCompletedMatch={hiddenCompletedMatch} onOpen={openGuest} openingGuestId={openingGuestId} />}
       {tab === 'completed' && !draft && <CompletedList query={query} setQuery={setQuery} guests={completedMatches} onOpen={openGuest} onCancel={cancelReception} />}
-      {(tab === 'reception' || tab === 'completed') && draft && <ReceptionWizard guest={draft} step={step} editingAttendance={editingAttendance} editingCake={editingCake} isEdit={draft.completed} saving={savingGuest} onBack={closeGuest} onChange={setDraftValue} onEditAttendance={setEditingAttendance} onEditCake={setEditingCake} onGoGift={goGift} onGoCake={goCake} onGoStep={setStep} onCake={confirmCake} onFinish={finishReception} onCancel={() => cancelReception(draft)} />}
+      {(tab === 'reception' || tab === 'completed') && draft && <ReceptionWizard guest={draft} step={step} editingAttendance={editingAttendance} editingCake={editingCake} isEdit={draft.completed} saving={savingGuest} conflictMessage={conflictMessage} saveError={saveError} onReload={()=>void reloadDraft()} onBack={closeGuest} onChange={setDraftValue} onEditAttendance={setEditingAttendance} onEditCake={setEditingCake} onGoGift={goGift} onGoCake={goCake} onGoStep={setStep} onCake={confirmCake} onFinish={finishReception} onCancel={() => cancelReception(draft)} />}
       {tab === 'dashboard' && <Dashboard state={state} tableDetail={tableDetail} setTableDetail={setTableDetail} />}
-      {tab === 'admin' && !isDemo && role === 'admin' && <AdminPanel state={state} completed={completed} imported={imported} sourceName={sourceName} importBusy={importBusy} importFeedback={importFeedback} fileRef={fileRef} onFile={handleImport} onGoogleSheet={handleGoogleSheet} applyImport={applyImport} cancelImport={() => setImported(null)} exportGiftCsv={exportGiftCsv} onSaveSettings={saveAdminSettings} onCopyRoleLink={async(roleToCopy)=>{ const url=`${location.origin}${location.pathname}?event=${encodeURIComponent(state.settings.eventCode)}&role=${roleToCopy}`; await navigator.clipboard.writeText(url); setNotice(roleToCopy==='reception'?'已複製接待人員連結':'已複製婚顧連結'); }} />}
+      {tab === 'admin' && !isDemo && role === 'admin' && <AdminPanel state={state} completed={completed} imported={imported} sourceName={sourceName} importBusy={importBusy} importFeedback={importFeedback} fileRef={fileRef} onFile={handleImport} onGoogleSheet={handleGoogleSheet} applyImport={applyImport} cancelImport={() => setImported(null)} exportGiftCsv={exportGiftCsv} exportReceptionCsv={exportReceptionCsv} onSaveSettings={saveAdminSettings} onCopyRoleLink={async(roleToCopy)=>{ const url=`${location.origin}${location.pathname}?event=${encodeURIComponent(state.settings.eventCode)}&role=${roleToCopy}`; await navigator.clipboard.writeText(url); setNotice(roleToCopy==='reception'?'已複製接待人員連結':'已複製婚顧連結'); }} />}
       {notice && <div className="toast" role="status">{notice}</div>}
     </main>
   );
@@ -351,18 +400,20 @@ function GuestCard({ guest, onOpen, busy=false }:{ guest:GuestGroup; onOpen:(gue
 }
 
 function CompletedList({ query, setQuery, guests, onOpen, onCancel }:{ query:string; setQuery:(value:string)=>void; guests:GuestGroup[]; onOpen:(guest:GuestGroup)=>void; onCancel:(guest:GuestGroup)=>void }) {
-  return <section className="content"><SearchCard query={query} setQuery={setQuery} /><div className="list-heading"><div><h2>已接待賓客</h2><p>可重新開啟並修正人數、紅包或喜餅紀錄。</p></div><strong>{guests.length} 組</strong></div><div className="completed-list">{guests.map((guest)=><article className="completed-row" key={guest.id}><div><span className={`status-chip ${deriveStatus(guest)}`}>{statusText(deriveStatus(guest))}</span><h3>{guest.name}</h3><p>實到 {guest.actual}／應到 {guest.expected} 位・{formatTables(guest)}</p></div><div className="completed-facts"><span>{guest.giftReceived ? `紅包${guest.giftAmount ? ` $${money.format(guest.giftAmount)}` : '（未填金額）'}` : '未收紅包'}</span><span>{guest.cakePlanned ? (guest.cakeOwed ? `欠餅 ${guest.cakeOwed} 盒` : `喜餅已領 ${guest.cakeDelivered} 盒`) : '不需喜餅'}</span></div><div className="row-actions"><button type="button" onClick={()=>onOpen(guest)}>修改</button><button className="danger-link" type="button" onClick={()=>onCancel(guest)}>取消接待</button></div></article>)}</div>{!guests.length&&<Empty title="尚無已接待賓客" copy="完成第一組接待後，紀錄會出現在這裡。" />}</section>;
+  return <section className="content"><SearchCard query={query} setQuery={setQuery} /><div className="list-heading"><div><h2>已接待賓客</h2><p>「重新開啟修改」會保留所有資料；只有「清除紀錄」才會刪除接待內容。</p></div><strong>{guests.length} 組</strong></div><div className="completed-list">{guests.map((guest)=><article className="completed-row" key={guest.id}><div><span className={`status-chip ${deriveStatus(guest)}`}>{statusText(deriveStatus(guest))}</span><h3>{guest.name}</h3><p>實到 {guest.actual}／應到 {guest.expected} 位・{formatTables(guest)}</p></div><div className="completed-facts"><span>{guest.giftReceived ? `紅包${guest.giftAmount ? ` $${money.format(guest.giftAmount)}` : '（未填金額）'}` : '未收紅包'}</span><span>{guest.cakePlanned ? (guest.cakeOwed ? `欠餅 ${guest.cakeOwed} 盒` : `喜餅已領 ${guest.cakeDelivered} 盒`) : '不需喜餅'}</span></div><div className="row-actions"><button type="button" onClick={()=>onOpen(guest)}>重新開啟修改</button><button className="danger-link" type="button" onClick={()=>onCancel(guest)}>清除紀錄</button></div></article>)}</div>{!guests.length&&<Empty title="尚無已接待賓客" copy="完成第一組接待後，紀錄會出現在這裡。" />}</section>;
 }
 
-type WizardProps = { guest:GuestGroup; step:number; editingAttendance:boolean; editingCake:boolean; isEdit:boolean; saving:boolean; onBack:()=>void; onChange:<K extends keyof GuestGroup>(key:K,value:GuestGroup[K])=>void; onEditAttendance:(value:boolean)=>void; onEditCake:(value:boolean)=>void; onGoGift:()=>void; onGoCake:()=>void; onGoStep:(step:number)=>void; onCake:(received:boolean)=>void; onFinish:()=>void; onCancel:()=>void };
+type WizardProps = { guest:GuestGroup; step:number; editingAttendance:boolean; editingCake:boolean; isEdit:boolean; saving:boolean; conflictMessage:string; saveError:string; onReload:()=>void; onBack:()=>void; onChange:<K extends keyof GuestGroup>(key:K,value:GuestGroup[K])=>void; onEditAttendance:(value:boolean)=>void; onEditCake:(value:boolean)=>void; onGoGift:()=>void; onGoCake:()=>void; onGoStep:(step:number)=>void; onCake:(received:boolean)=>void; onFinish:()=>void; onCancel:()=>void };
 function ReceptionWizard(props:WizardProps) {
-  const { guest, step, editingAttendance, editingCake, isEdit, saving, onBack, onChange, onEditAttendance, onEditCake, onGoGift, onGoCake, onGoStep, onCake, onFinish, onCancel } = props;
+  const { guest, step, editingAttendance, editingCake, isEdit, saving, conflictMessage, saveError, onReload, onBack, onChange, onEditAttendance, onEditCake, onGoGift, onGoCake, onGoStep, onCake, onFinish, onCancel } = props;
   return <section className="content reception-card"><button className="back" type="button" onClick={onBack}>‹ 返回{isEdit?'已接待':'賓客列表'}</button><div className="selected-title"><h2>{guest.name}</h2></div><Progress step={step} />
+    {conflictMessage&&<div className="draft-alert conflict-alert" role="alert"><div><b>另一台裝置已更新這位賓客</b><span>{conflictMessage}</span></div><button type="button" onClick={onReload}>載入最新資料</button></div>}
+    {saveError&&<div className="draft-alert save-alert" role="alert"><div><b>尚未儲存成功</b><span>{saveError}</span></div></div>}
     <div className="wizard-panel">
       {step===1&&<><div className="section-title"><h3>確認賓客的到場人數</h3></div><div className="expected-count"><span>名單應到</span><strong>{guest.expected}</strong><span>位</span></div>{editingAttendance&&<div className="edit-box"><NumberField label="實到人數" value={guest.actual} onChange={(value)=>onChange('actual',value)} max={99} /><NumberField label={`其中素食（原定 ${guest.vegetarianExpected}）`} value={guest.vegetarianActual} onChange={(value)=>onChange('vegetarianActual',value)} max={guest.actual||99} /><NumberField label={`其中兒童椅（原定 ${guest.childChairExpected}）`} value={guest.childChairActual} onChange={(value)=>onChange('childChairActual',value)} max={guest.actual||99} /></div>}<div className="action-row"><button className="secondary" type="button" onClick={()=>{ onEditAttendance(!editingAttendance); if(!editingAttendance){onChange('actual',guest.actual||guest.expected);onChange('vegetarianActual',guest.vegetarianActual||guest.vegetarianExpected);onChange('childChairActual',guest.childChairActual||guest.childChairExpected);} }}>{editingAttendance?'收起修改':'修改實到人數'}</button><button className="primary" type="button" onClick={()=>{ if(!editingAttendance){onChange('actual',guest.expected);onChange('vegetarianActual',guest.vegetarianExpected);onChange('childChairActual',guest.childChairExpected);} window.setTimeout(onGoGift,0); }}>{editingAttendance?`確認 ${guest.actual} 位已到`:`確認 ${guest.expected} 位已到`}</button></div></>}
       {step===2&&<><SectionTitle title="登記紅包" copy="沒有紅包也可以直接前往下一步。" prominent /><div className="check-stack"><label className="check-card"><input type="checkbox" checked={guest.giftReceived} onChange={(event)=>onChange('giftReceived',event.target.checked)} /><span><b>已收到紅包</b></span></label>{guest.giftReceived&&<><label className="check-card warning"><input type="checkbox" checked={guest.bagNamed} onChange={(event)=>onChange('bagNamed',event.target.checked)} /><span><b>已確認袋上有編號或姓名</b></span></label><label className="field"><span>紅包編號</span><input inputMode="numeric" placeholder="例如：023" value={guest.giftName} onChange={(event)=>onChange('giftName',event.target.value)} /></label><label className="field"><span>禮金金額（可不填）</span><input inputMode="numeric" placeholder="留白即可" value={guest.giftAmount??''} onChange={(event)=>onChange('giftAmount',event.target.value===''?null:Number(event.target.value))} /></label></>}<label className="field"><span>備註（可不填）</span><textarea placeholder="例如：同一賓客另有一個紅包" value={guest.note} onChange={(event)=>onChange('note',event.target.value)} /></label></div><div className="action-row"><button className="secondary" type="button" onClick={()=>onGoStep(1)}>上一步</button><button className="primary" type="button" onClick={onGoCake}>{guest.giftReceived?'完成紅包登記':'沒有紅包，繼續'}</button></div></>}
       {step===3&&<><div className="section-title"><h3>確認喜餅領取</h3></div><div className="cake-display"><div className="cake-types">{guest.cakeChinesePlanned>0&&<div className="cake-content"><span>中式喜餅</span><strong>{guest.cakeChinesePlanned}</strong><span>盒</span></div>}{guest.cakeWesternPlanned>0&&<div className="cake-content"><span>西式喜餅</span><strong>{guest.cakeWesternPlanned}</strong><span>盒</span></div>}{guest.cakePlanned===0&&<div className="cake-content"><span>不需喜餅</span></div>}</div></div>{guest.cakePlanned>0&&<button className="inline-edit" type="button" onClick={()=>onEditCake(!editingCake)}>{editingCake?'收起修改':'修改數量'}</button>}{editingCake&&<div className="edit-box cake-edit"><NumberField label="中式喜餅" value={guest.cakeChinesePlanned} onChange={(value)=>onChange('cakeChinesePlanned',value)} max={20} /><NumberField label="西式喜餅" value={guest.cakeWesternPlanned} onChange={(value)=>onChange('cakeWesternPlanned',value)} max={20} /></div>}<div className="action-row"><button className="secondary" type="button" onClick={()=>onGoStep(2)}>上一步</button>{guest.cakePlanned>0?<button className="primary" type="button" onClick={()=>onCake(true)}>確認領餅</button>:<button className="primary" type="button" onClick={()=>onCake(false)}>不需領餅，繼續</button>}</div>{guest.cakePlanned>0&&<button className="rare-action" type="button" onClick={()=>{if(window.confirm('確定要登記這位賓客的喜餅尚未領取嗎？'))onCake(false);}}>喜餅不足或未帶走？登記欠餅</button>}</>}
-      {step===4&&<><SectionTitle title="告知賓客入席桌次" /><div className="table-display">{guest.tables.length?guest.tables.map((table)=><div key={table.table}><strong>{table.table}</strong>{guest.tables.length>1&&<span>安排 {table.planned} 位</span>}</div>):<div><strong>待安排</strong></div>}</div>{guest.cakeOwed>0&&<div className="owed-banner">已登記欠餅：中式 {guest.cakeChineseOwed} 盒、西式 {guest.cakeWesternOwed} 盒</div>}<div className="action-row"><button className="secondary" type="button" disabled={saving} onClick={()=>onGoStep(3)}>上一步</button><button className="primary finish" type="button" disabled={saving} onClick={onFinish}>{saving?'同步中…':isEdit?'儲存修改':'完成接待'}</button></div>{isEdit&&<button className="cancel-reception" type="button" disabled={saving} onClick={onCancel}>取消此賓客的接待紀錄</button>}</>}
+      {step===4&&<><SectionTitle title="告知賓客入席桌次" /><div className="table-display">{guest.tables.length?guest.tables.map((table)=><div key={table.table}><strong>{table.table}</strong>{guest.tables.length>1&&<span>安排 {table.planned} 位</span>}</div>):<div><strong>待安排</strong></div>}</div>{guest.cakeOwed>0&&<div className="owed-banner">已登記欠餅：中式 {guest.cakeChineseOwed} 盒、西式 {guest.cakeWesternOwed} 盒</div>}<div className="action-row"><button className="secondary" type="button" disabled={saving} onClick={()=>onGoStep(3)}>上一步</button><button className="primary finish" type="button" disabled={saving||Boolean(conflictMessage)} onClick={onFinish}>{saving?'同步中…':isEdit?'儲存修改':'完成接待'}</button></div>{isEdit&&<button className="cancel-reception" type="button" disabled={saving} onClick={onCancel}>清除這筆接待紀錄</button>}</>}
     </div>
   </section>;
 }
@@ -394,9 +445,9 @@ function Dashboard({ state, tableDetail, setTableDetail }:{state:AppState;tableD
 function Metric({label,value,unit,detail,tone}:{label:string;value:string;unit?:string;detail:string;tone:string}) { return <article className={`metric ${tone}`}><p>{label}</p><strong>{value}<small>{unit}</small></strong><span>{detail}</span></article>; }
 function CakeMetric({title,stock,planned,delivered,tone,onClick}:{title:string;stock:number;planned:number;delivered:number;tone:string;onClick:()=>void}) { return <button type="button" className={`cake-metric ${tone}`} onClick={onClick} aria-label={`查看${title}領取名單`}><h3>{title}<i aria-hidden="true">›</i></h3><div><span><small>庫存數量</small><strong>{stock}<i>盒</i></strong></span><span><small>應發數量</small><strong>{planned}<i>盒</i></strong></span><span><small>已發數量</small><strong>{delivered}<i>盒</i></strong></span></div></button>; }
 
-type AdminSection='setup'|'guests'|'staff'|'gifts';
-type AdminProps={state:AppState;completed:GuestGroup[];imported:ImportedPayload|null;sourceName:string;importBusy:boolean;importFeedback:{tone:'success'|'error'|'info';text:string}|null;fileRef:React.RefObject<HTMLInputElement|null>;onFile:(file:File)=>void;onGoogleSheet:(url:string)=>void;applyImport:()=>void;cancelImport:()=>void;exportGiftCsv:()=>void;onSaveSettings:(patch:Record<string,unknown>)=>Promise<void>;onCopyRoleLink:(role:'reception'|'planner')=>void};
-function AdminPanel({state,completed,imported,sourceName,importBusy,importFeedback,fileRef,onFile,onGoogleSheet,applyImport,cancelImport,exportGiftCsv,onSaveSettings,onCopyRoleLink}:AdminProps) {
+type AdminSection='setup'|'guests'|'staff'|'reports';
+type AdminProps={state:AppState;completed:GuestGroup[];imported:ImportedPayload|null;sourceName:string;importBusy:boolean;importFeedback:{tone:'success'|'error'|'info';text:string}|null;fileRef:React.RefObject<HTMLInputElement|null>;onFile:(file:File)=>void;onGoogleSheet:(url:string)=>void;applyImport:()=>void;cancelImport:()=>void;exportGiftCsv:()=>void;exportReceptionCsv:()=>void;onSaveSettings:(patch:Record<string,unknown>)=>Promise<void>;onCopyRoleLink:(role:'reception'|'planner')=>void};
+function AdminPanel({state,completed,imported,sourceName,importBusy,importFeedback,fileRef,onFile,onGoogleSheet,applyImport,cancelImport,exportGiftCsv,exportReceptionCsv,onSaveSettings,onCopyRoleLink}:AdminProps) {
   const [section,setSection]=useState<AdminSection>('setup');
   const [sheetUrl,setSheetUrl]=useState('');
   const [eventName,setEventName]=useState(state.settings.eventName);
@@ -411,7 +462,7 @@ function AdminPanel({state,completed,imported,sourceName,importBusy,importFeedba
   const toggleReception=async()=>{if(state.settings.receptionOpen&&!window.confirm('關閉後，接待人員與婚顧都無法進入。確定關閉嗎？'))return;setSettingsBusy(true);try{await onSaveSettings({receptionOpen:!state.settings.receptionOpen});}finally{setSettingsBusy(false);}};
   return <section className="content admin-page">
     <div className="dashboard-heading"><div><p className="eyebrow">僅 Admin 可見</p><h2>{state.settings.eventName}</h2><small>婚宴代碼 {state.settings.eventCode}</small></div><span className={state.settings.receptionOpen?'open':'closed'}>{state.settings.receptionOpen?'接待開放中':'接待已關閉'}</span></div>
-    <nav className="admin-nav" aria-label="婚宴管理功能">{([['setup','設定'],['guests',`賓客名單 ${state.guests.length}`],['staff','工作人員'],['gifts','禮金報表']] as [AdminSection,string][]).map(([key,label])=><button key={key} type="button" className={section===key?'active':''} onClick={()=>setSection(key)}>{label}</button>)}</nav>
+    <nav className="admin-nav" aria-label="婚宴管理功能">{([['setup','設定'],['guests',`賓客名單 ${state.guests.length}`],['staff','工作人員'],['reports','報表']] as [AdminSection,string][]).map(([key,label])=><button key={key} type="button" className={section===key?'active':''} onClick={()=>setSection(key)}>{label}</button>)}</nav>
 
     {section==='setup'&&<div className="admin-stack">
       <article className="admin-card"><div className="card-head"><div><p>步驟 1</p><h3>場次基本設定</h3></div><span>{state.settings.eventCode}</span></div><label className="field"><span>婚宴名稱</span><input value={eventName} onChange={e=>setEventName(e.target.value)} /></label><div className="stock-grid"><label className="field"><span>中式喜餅現場庫存</span><input inputMode="numeric" value={cakeStockChinese||''} placeholder="0" onChange={e=>setCakeStockChinese(Number(e.target.value)||0)} /></label><label className="field"><span>西式喜餅現場庫存</span><input inputMode="numeric" value={cakeStockWestern||''} placeholder="0" onChange={e=>setCakeStockWestern(Number(e.target.value)||0)} /></label></div><button className="primary settings-save" type="button" disabled={settingsBusy||!eventName.trim()} onClick={saveSettings}>{settingsBusy?'儲存中…':'儲存設定'}</button></article>
@@ -424,7 +475,7 @@ function AdminPanel({state,completed,imported,sourceName,importBusy,importFeedba
 
     {section==='staff'&&<article className="admin-card"><div className="card-head"><div><p>工作人員入口</p><h3>連結與 PIN 分開提供</h3></div><span>{state.settings.eventName}</span></div><p className="card-copy">接待開放期間兩個入口都可使用；關閉接待後會一起停用。</p><div className="access-row"><div><b>接待人員</b><span>可接待、修改與看總覽</span></div><button type="button" onClick={()=>onCopyRoleLink('reception')}>複製入口</button><code>PIN {state.settings.receptionPin}</code></div><div className="access-row"><div><b>婚顧</b><span>唯讀查看現場總覽</span></div><button type="button" onClick={()=>onCopyRoleLink('planner')}>複製入口</button><code>PIN {state.settings.plannerPin}</code></div></article>}
 
-    {section==='gifts'&&<article className="admin-card gift-report"><div className="card-head"><div><p>禮金報表</p><h3>已登記禮金</h3></div><span>只有 Admin 可匯出</span></div><div className="gift-summary"><div><span>已填金額</span><strong>${money.format(giftTotal)}</strong></div><div><span>收到紅包</span><strong>{completed.filter(g=>g.giftReceived).length}<small> 組</small></strong></div><button className="primary" type="button" onClick={exportGiftCsv}>匯出 CSV</button></div></article>}
+    {section==='reports'&&<div className="admin-stack"><article className="admin-card report-card"><div className="card-head"><div><p>完整接待報表</p><h3>婚宴結束後核對名單</h3></div><span>只有 Admin 可匯出</span></div><p className="card-copy">包含應到與實到、素食、兒童椅、喜餅、紅包、接待人員及完成時間。</p><div className="report-action"><div><strong>{completed.length}<small>／{state.guests.length} 組</small></strong><span>已完成接待</span></div><button className="primary" type="button" onClick={exportReceptionCsv}>匯出完整接待 CSV</button></div></article><article className="admin-card gift-report"><div className="card-head"><div><p>禮金報表</p><h3>已登記禮金</h3></div><span>只有 Admin 可匯出</span></div><div className="gift-summary"><div><span>已填金額</span><strong>${money.format(giftTotal)}</strong></div><div><span>收到紅包</span><strong>{completed.filter(g=>g.giftReceived).length}<small> 組</small></strong></div><button className="primary" type="button" onClick={exportGiftCsv}>匯出禮金 CSV</button></div></article></div>}
   </section>;
 }
 
