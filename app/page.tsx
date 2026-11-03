@@ -306,8 +306,8 @@ export default function Home() {
     try {
       const result = await callCloud<{ title:string; sheetName:string; values:unknown[][]; rowCount:number }>('readGoogleSheet', { eventCode:state.settings.eventCode, token:sessionToken, url }, { retries:1, timeoutMs:20000 });
       const parsed = parseGuestMatrix(result.values);
-      if (!parsed.guests.length) throw new Error('試算表中沒有找到賓客資料，請確認第一列欄位名稱');
-      setImported(parsed); setSourceName(`${result.title}／${result.sheetName}`); setImportFeedback({ tone:'success', text:`讀取成功：${result.rowCount} 列資料整理為 ${parsed.guests.length} 組賓客。` });
+      if (!parsed.guests.length) throw new Error('試算表中沒有找到賓客資料，請確認欄位名稱');
+      setImported(parsed); setSourceName(`${result.title}／${result.sheetName}`); setImportFeedback({ tone:'success', text:`讀取成功：整理為 ${parsed.guests.length} 組賓客，請確認下方資料。` });
     } catch (error) { setImportFeedback({ tone:'error', text:error instanceof Error ? error.message : '無法讀取 Google Sheet' }); }
     finally { setImportBusy(false); }
   };
