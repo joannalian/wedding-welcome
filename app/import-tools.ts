@@ -13,9 +13,21 @@ export type ImportDiagnostics = {
 export type ParsedImport = { guests: GuestGroup[]; diagnostics: ImportDiagnostics };
 
 const recognizedHeaderNames = new Set([
-  '原始群組','賓客','群組','姓名','分類','電話','預計人數','應到人數','應到','桌次',
+  '原始群組','賓客','群組','姓名','分類','電話','預計人數','應到人數','應到','桌次','桌子暱稱',
   '素食','兒童座椅','中式喜餅數量（群組合計）','中式喜餅','西式喜餅數量（群組合計）','西式喜餅','備註',
 ]);
+
+const guestNameHeaderNames = ['原始群組','賓客','群組','姓名'];
+
+function splitGuestMatrix(matrix: unknown[][]) {
+  const headerIndex = matrix.findIndex((row) => {
+    const headers = row.map((cell) => String(cell ?? '').trim()).filter(Boolean);
+    const recognizedCount = headers.filter((header) => recognizedHeaderNames.has(header)).length;
+    return guestNameHeaderNames.some((header) => headers.includes(header)) && recognizedCount >= 2;
+  });
+  const start = headerIndex >= 0 ? headerIndex : 0;
+  return { rawHeaders: matrix[start] || [], body: matrix.slice(start + 1) };
+}
 
 const truthy = (value: unknown) => /^(1|是|有|需要|素食|兒童椅|true|v)$/i.test(String(value ?? '').trim());
 const num = (value: unknown) => {
@@ -66,21 +78,20 @@ export function rowsToGuests(rows: Row[]): GuestGroup[] {
 }
 
 export function matrixToGuests(matrix: unknown[][]) {
-  const [headers = [], ...body] = matrix;
-  return rowsToGuests(body.map((cells) => Object.fromEntries(headers.map((header, index) => [String(header ?? '').trim(), cells[index] ?? '']))));
+  return parseGuestMatrix(matrix).guests;
 }
 
 export function parseGuestMatrix(matrix: unknown[][]): ParsedImport {
-  const [rawHeaders = [], ...body] = matrix;
+  const { rawHeaders, body } = splitGuestMatrix(matrix);
   const headers = rawHeaders.map((header) => String(header ?? '').trim()).filter(Boolean);
   const guests = rowsToGuests(body.map((cells) => Object.fromEntries(rawHeaders.map((header, index) => [String(header ?? '').trim(), cells[index] ?? '']))));
   const recognizedHeaders = headers.filter((header) => recognizedHeaderNames.has(header));
   const unknownHeaders = headers.filter((header) => !recognizedHeaderNames.has(header));
   const hasAny = (...names: string[]) => names.some((name) => headers.includes(name));
   const warnings: string[] = [];
-  if (!hasAny('原始群組','賓客','群組','姓名')) warnings.push('未辨識賓客名稱欄位');
+  if (!hasAny(...guestNameHeaderNames)) warnings.push('未辨識賓客名稱欄位');
   if (!hasAny('桌次')) warnings.push('未辨識桌次欄位，賓客會暫列為待安排');
-  if (!hasAny('預計人數','應到人數','應到')) warnings.push('未辨識應到人數欄位，將依資料列數估算');
+  if (!hasAny('預計人數','應到人數','應到') && !(hasAny('原始群組') && hasAny('姓名'))) warnings.push('未辨識應到人數欄位，將依資料列數估算');
   if (!hasAny('中式喜餅數量（群組合計）','中式喜餅')) warnings.push('未辨識中式喜餅欄位，數量將以 0 匯入');
   if (!hasAny('西式喜餅數量（群組合計）','西式喜餅')) warnings.push('未辨識西式喜餅欄位，數量將以 0 匯入');
   if (unknownHeaders.length) warnings.push(`有 ${unknownHeaders.length} 個欄位未套用：${unknownHeaders.join('、')}`);
