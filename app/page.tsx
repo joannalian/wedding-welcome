@@ -50,18 +50,27 @@ export default function Home() {
   const [conflictMessage, setConflictMessage] = useState('');
   const [saveError, setSaveError] = useState('');
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('synced');
+  const [syncError, setSyncError] = useState('');
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const remoteSnapshot = useRef('');
   const writeInFlight = useRef(false);
   const refreshInFlight = useRef(false);
 
-  const markSynced = () => { setSyncStatus('synced'); setLastSyncedAt(Date.now()); };
+  const markSynced = () => { setSyncError(''); setSyncStatus('synced'); setLastSyncedAt(Date.now()); };
+  const markSyncError = (message: string) => { setSyncError(message); setSyncStatus('error'); };
 
   const refreshEvent = useCallback(async (showFeedback=false) => {
     if (screen !== 'app' || !hasCloudBackend() || !sessionToken || !state.settings.eventCode || writeInFlight.current || refreshInFlight.current) return;
     refreshInFlight.current = true;
     if (showFeedback) setSyncStatus('syncing');
+    const applyRemote = (remote: AppState) => {
+      remoteSnapshot.current = JSON.stringify(remote); setState(remote);
+      if (draft) {
+        const latest = remote.guests.find((guest)=>guest.id===draft.id);
+        if (latest && latest.updatedAt !== draftBaseUpdatedAt) setConflictMessage(`這筆資料剛剛已由「${latest.completedBy||'其他接待人員'}」更新，請先載入最新資料。`);
+      }
+    };
     try {
       const heartbeat = await getCloudRevision(state.settings.eventCode, sessionToken);
       if (!heartbeat.receptionOpen && state.settings.role !== 'admin') {
@@ -70,17 +79,22 @@ export default function Home() {
       }
       if (heartbeat.revision !== state.settings.revision) {
         const remote = await loadEvent(state.settings.eventCode, sessionToken);
-        remoteSnapshot.current = JSON.stringify(remote); setState(remote);
-        if (draft) {
-          const latest = remote.guests.find((guest)=>guest.id===draft.id);
-          if (latest && latest.updatedAt !== draftBaseUpdatedAt) setConflictMessage(`這筆資料剛剛已由「${latest.completedBy||'其他接待人員'}」更新，請先載入最新資料。`);
-        }
+        applyRemote(remote);
       }
       markSynced();
       if (showFeedback) setNotice('已取得最新資料');
-    } catch (error) {
-      setSyncStatus('error');
-      if (showFeedback) setNotice(error instanceof Error ? error.message : '目前無法同步，請稍後重試');
+    } catch (heartbeatError) {
+      try {
+        const remote = await loadEvent(state.settings.eventCode, sessionToken);
+        applyRemote(remote); markSynced();
+        if (showFeedback) setNotice('輕量檢查未回應，已改用完整同步並取得最新資料');
+      } catch (fullSyncError) {
+        const heartbeatMessage = heartbeatError instanceof Error ? heartbeatError.message : '輕量同步失敗';
+        const fullSyncMessage = fullSyncError instanceof Error ? fullSyncError.message : '完整同步失敗';
+        const detail = heartbeatMessage === fullSyncMessage ? fullSyncMessage : `輕量檢查：${heartbeatMessage}；完整同步：${fullSyncMessage}`;
+        markSyncError(detail);
+        if (showFeedback) setNotice(`同步失敗：${detail}`);
+      }
     } finally { refreshInFlight.current = false; }
   }, [draft, draftBaseUpdatedAt, screen, sessionToken, state.settings.eventCode, state.settings.revision, state.settings.role]);
 
@@ -182,7 +196,7 @@ export default function Home() {
         const remote = await loadEvent(state.settings.eventCode, sessionToken);
         remoteSnapshot.current = JSON.stringify(remote); setState(remote); markSynced();
         currentGuest = remote.guests.find((item) => item.id === guest.id) || guest;
-      } catch (error) { setSyncStatus('error'); setNotice(error instanceof Error ? error.message : '無法取得最新賓客資料'); setOpeningGuestId(''); return; }
+      } catch (error) { const message=error instanceof Error ? error.message : '無法取得最新賓客資料'; markSyncError(message); setNotice(message); setOpeningGuestId(''); return; }
       setOpeningGuestId('');
     }
     const next = clone(currentGuest);
@@ -199,7 +213,7 @@ export default function Home() {
       const remote=await loadEvent(state.settings.eventCode,sessionToken), latest=remote.guests.find((guest)=>guest.id===draft.id);
       if (!latest) throw new Error('這位賓客已不在最新名單');
       remoteSnapshot.current=JSON.stringify(remote); setState(remote); setDraft(clone(latest)); setDraftBaseUpdatedAt(latest.updatedAt); setConflictMessage(''); setSaveError(''); setStep(1); markSynced(); setNotice('已載入最新接待資料，請重新確認');
-    } catch(error) { setSyncStatus('error'); setSaveError(error instanceof Error?error.message:'無法載入最新資料'); }
+    } catch(error) { const message=error instanceof Error?error.message:'無法載入最新資料'; markSyncError(message); setSaveError(message); }
   };
 
   const setDraftValue = <K extends keyof GuestGroup>(key: K, value: GuestGroup[K]) => setDraft((current) => {
@@ -253,8 +267,8 @@ export default function Home() {
       setNotice(`${finished.name} 已完成接待並同步`); closeGuest(); setQuery(''); setTab('reception');
     } catch (error) {
       const message=error instanceof Error ? error.message : '接待資料儲存失敗';
-      if (message.includes('剛剛已由')) { setConflictMessage(message); setSyncStatus('synced'); }
-      else { setSaveError(`${message}。目前填寫內容仍保留在畫面上，請確認連線後重新送出。`); setSyncStatus('error'); }
+      if (message.includes('剛剛已由')) { setConflictMessage(message); markSynced(); }
+      else { setSaveError(`${message}。目前填寫內容仍保留在畫面上，請確認連線後重新送出。`); markSyncError(message); }
     }
     finally { writeInFlight.current = false; setSavingGuest(false); }
   };
@@ -273,7 +287,7 @@ export default function Home() {
       if (isDemo) setState((current) => ({ ...current, guests: current.guests.map((item) => item.id === guest.id ? cancelled : item) }));
       else { const result = await updateCloudGuest(state.settings.eventCode, cancelled, sessionToken, guest.updatedAt); remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); }
       markSynced(); setNotice(`${guest.name} 的接待紀錄已清除並同步`); closeGuest();
-    } catch (error) { const message=error instanceof Error ? error.message : '無法清除接待紀錄'; setNotice(message); setSyncStatus(message.includes('剛剛已由')?'synced':'error'); }
+    } catch (error) { const message=error instanceof Error ? error.message : '無法清除接待紀錄'; setNotice(message); if(message.includes('剛剛已由')) markSynced(); else markSyncError(message); }
     finally { writeInFlight.current = false; setSavingGuest(false); }
   };
 
@@ -306,7 +320,7 @@ export default function Home() {
       const result = await applyCloudImport(state.settings.eventCode, imported.guests, sourceName, sessionToken);
       remoteSnapshot.current = JSON.stringify(result.state); setState(result.state); setImported(null); markSynced();
       const s = result.summary; setImportFeedback({ tone:'success', text:`匯入完成並已同步：新增 ${s.added}、更新 ${s.updated}、移除 ${s.removed}${s.retained ? `、保留已接待 ${s.retained}` : ''} 組。` });
-    } catch (error) { setSyncStatus('error'); setImportFeedback({ tone:'error', text:error instanceof Error ? error.message : '名單匯入失敗' }); }
+    } catch (error) { const message=error instanceof Error ? error.message : '名單匯入失敗'; markSyncError(message); setImportFeedback({ tone:'error', text:message }); }
     finally { writeInFlight.current = false; setImportBusy(false); }
   };
 
@@ -322,7 +336,7 @@ export default function Home() {
         remoteSnapshot.current = JSON.stringify(remote); setState(remote);
         if (saved) { markSynced(); setNotice('設定已儲存並同步'); return; }
       } catch { /* show the original write error below */ }
-      setSyncStatus('error'); setNotice(error instanceof Error ? error.message : '設定儲存失敗'); throw error;
+      const message=error instanceof Error ? error.message : '設定儲存失敗'; markSyncError(message); setNotice(message); throw error;
     } finally { writeInFlight.current = false; }
   };
 
@@ -359,7 +373,7 @@ export default function Home() {
       <header className="topbar">
         <div><p className="eyebrow">{state.settings.eventName}</p><h1>好日子迎賓</h1></div>
         <div className="top-actions">
-          <button className={`sync ${isDemo?'demo':syncStatus}`} type="button" disabled={isDemo||syncStatus==='syncing'} onClick={()=>void refreshEvent(true)} aria-label={isDemo?'虛構示範資料':'重新同步婚宴資料'}><i /><span className="sync-long">{isDemo?'虛構示範資料':syncStatus==='syncing'?'同步中…':syncStatus==='error'?'連線不穩・點此重試':`已同步${lastSyncedAt?`・${new Date(lastSyncedAt).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'})}`:''}`}</span><span className="sync-short">{isDemo?'示範':syncStatus==='syncing'?'同步中':syncStatus==='error'?'同步失敗':'已同步'}</span></button>
+          <button className={`sync ${isDemo?'demo':syncStatus}`} type="button" disabled={isDemo||syncStatus==='syncing'} onClick={()=>void refreshEvent(true)} aria-label={isDemo?'虛構示範資料':syncStatus==='error'?`同步失敗：${syncError}。點此重試`:'重新同步婚宴資料'}><i /><span className="sync-long">{isDemo?'虛構示範資料':syncStatus==='syncing'?'同步中…':syncStatus==='error'?'同步失敗・點此重試':`已同步${lastSyncedAt?`・${new Date(lastSyncedAt).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'})}`:''}`}</span><span className="sync-short">{isDemo?'示範':syncStatus==='syncing'?'同步中':syncStatus==='error'?'同步失敗':'已同步'}</span></button>
           <button className="operator" type="button" onClick={() => role === 'admin' && setTab('admin')}>{role === 'admin' ? 'Admin' : role === 'planner' ? '婚顧' : '接待'}・{state.settings.operator}</button>
           <button className="top-exit" type="button" onClick={returnHome}>{isDemo ? '離開示範' : role === 'admin' ? '切換婚宴' : '離開'}</button>
         </div>
@@ -370,6 +384,8 @@ export default function Home() {
           {item.label}{typeof item.count === 'number' && <span>{item.count}</span>}
         </button>)}
       </nav>
+
+      {!isDemo && syncStatus === 'error' && <div className="sync-error-banner" role="alert"><div><b>資料同步失敗</b><span>{syncError || '目前無法取得最新資料，請稍後重試。'}</span></div><button type="button" onClick={()=>void refreshEvent(true)}>重新同步</button></div>}
 
       {tab === 'reception' && !draft && <GuestBrowser query={query} setQuery={setQuery} guests={candidates} hiddenCompletedMatch={hiddenCompletedMatch} onOpen={openGuest} openingGuestId={openingGuestId} />}
       {tab === 'completed' && !draft && <CompletedList query={query} setQuery={setQuery} guests={completedMatches} onOpen={openGuest} onCancel={cancelReception} />}

@@ -63,3 +63,11 @@
 .arrival-badge.over{background:#ead6d6;color:#793b3e}
 .table-arrival-list>.table-arrival-row>.table-arrival-result>strong{font-size:13px}
 @media(max-width:390px){.table-arrival-list>.table-arrival-row{align-items:start;padding:13px 12px}.arrival-badge{font-size:11px;padding-inline:8px}.table-arrival-identity b{font-size:15px}}
+
+/* Persistent sync failure details: never reduce every backend error to "unstable connection". */
+.sync-error-banner{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:14px clamp(16px,4vw,52px) 0;padding:13px 15px;border:1px solid #e5b3b0;border-radius:14px;background:#fff0ef;color:#823d3d}
+.sync-error-banner>div{display:grid;gap:3px;min-width:0}
+.sync-error-banner b{font-size:13px}
+.sync-error-banner span{font-size:12px;line-height:1.55;overflow-wrap:anywhere}
+.sync-error-banner button{flex:0 0 auto;min-height:38px;border:0;border-radius:10px;background:var(--danger);padding:8px 12px;color:#fff;font-size:12px;font-weight:900}
+@media(max-width:620px){.sync-error-banner{align-items:stretch;flex-direction:column;gap:10px;margin:10px 13px 0}.sync-error-banner button{width:100%}}
