@@ -30,6 +30,7 @@ export type GuestGroup = {
   bagNamed: boolean;
   giftName: string;
   giftAmount: number | null;
+  sourceNote: string;
   note: string;
   completed: boolean;
   completedAt: string | null;

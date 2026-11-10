@@ -10,6 +10,10 @@ import { initialState } from './sample-data';
 const DEMO_STORAGE_KEY = 'hao-ri-zi-ying-bin-demo-v2';
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 const money = new Intl.NumberFormat('zh-TW');
+const visibleSourceNote = (note: string | undefined) => {
+  const value = String(note || '').trim();
+  return /^(已確認|確認|v|ok)$/i.test(value) ? '' : value;
+};
 const syncCakeTotals = (guest: GuestGroup): GuestGroup => {
   const cakePlanned = guest.cakeChinesePlanned + guest.cakeWesternPlanned;
   const cakeDelivered = guest.cakeChineseDelivered + guest.cakeWesternDelivered;
@@ -148,7 +152,7 @@ export default function Home() {
   const waiting = state.guests.filter((guest) => !guest.completed);
   const completed = state.guests.filter((guest) => guest.completed);
   const normalized = query.trim().toLowerCase();
-  const matches = (guest: GuestGroup) => `${guest.name}${guest.category}${guest.phone}${guest.tables.map((table) => table.table).join('')}`.toLowerCase().includes(normalized);
+  const matches = (guest: GuestGroup) => `${guest.name}${guest.category}${guest.phone}${guest.sourceNote||''}${guest.tables.map((table) => table.table).join('')}`.toLowerCase().includes(normalized);
   const candidates = waiting.filter((guest) => !normalized || matches(guest));
   const completedMatches = completed.filter((guest) => !normalized || matches(guest));
   const hiddenCompletedMatch = normalized ? completed.find(matches) : undefined;
@@ -349,8 +353,8 @@ export default function Home() {
   };
 
   const exportReceptionCsv = () => {
-    const header=['賓客','分類','電話','桌次','應到','實到','素食應到','素食實到','兒童椅應到','兒童椅實到','中式喜餅應發','中式喜餅已發','中式欠餅','西式喜餅應發','西式喜餅已發','西式欠餅','收到紅包','紅包編號','禮金金額','袋上有編號或姓名','備註','接待狀態','接待人員','完成時間','最後更新'];
-    const rows=state.guests.map((guest)=>[guest.name,guest.category,guest.phone,formatTables(guest),guest.expected,guest.actual,guest.vegetarianExpected,guest.vegetarianActual,guest.childChairExpected,guest.childChairActual,guest.cakeChinesePlanned,guest.cakeChineseDelivered,guest.cakeChineseOwed,guest.cakeWesternPlanned,guest.cakeWesternDelivered,guest.cakeWesternOwed,guest.giftReceived?'是':'否',guest.giftName,guest.giftAmount??'',guest.bagNamed?'是':'否',guest.note,guest.completed?'已接待':'未接待',guest.completedBy,guest.completedAt||'',guest.updatedAt]);
+    const header=['賓客','分類','電話','桌次','應到','實到','素食應到','素食實到','兒童椅應到','兒童椅實到','中式喜餅應發','中式喜餅已發','中式欠餅','西式喜餅應發','西式喜餅已發','西式欠餅','收到紅包','紅包編號','禮金金額','袋上有編號或姓名','名單備註','現場備註','接待狀態','接待人員','完成時間','最後更新'];
+    const rows=state.guests.map((guest)=>[guest.name,guest.category,guest.phone,formatTables(guest),guest.expected,guest.actual,guest.vegetarianExpected,guest.vegetarianActual,guest.childChairExpected,guest.childChairActual,guest.cakeChinesePlanned,guest.cakeChineseDelivered,guest.cakeChineseOwed,guest.cakeWesternPlanned,guest.cakeWesternDelivered,guest.cakeWesternOwed,guest.giftReceived?'是':'否',guest.giftName,guest.giftAmount??'',guest.bagNamed?'是':'否',guest.sourceNote||'',guest.note,guest.completed?'已接待':'未接待',guest.completedBy,guest.completedAt||'',guest.updatedAt]);
     const escape=(value:unknown)=>`"${String(value??'').replaceAll('"','""')}"`;
     const blob=new Blob(['\ufeff'+[header,...rows].map(row=>row.map(escape).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'});
     const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`${state.settings.eventName}_完整接待紀錄.csv`;link.click();URL.revokeObjectURL(link.href);
@@ -422,7 +426,9 @@ function CompletedList({ query, setQuery, guests, onOpen, onCancel }:{ query:str
 type WizardProps = { guest:GuestGroup; step:number; editingAttendance:boolean; editingCake:boolean; isEdit:boolean; saving:boolean; conflictMessage:string; saveError:string; onReload:()=>void; onBack:()=>void; onChange:<K extends keyof GuestGroup>(key:K,value:GuestGroup[K])=>void; onEditAttendance:(value:boolean)=>void; onEditCake:(value:boolean)=>void; onGoGift:()=>void; onGoCake:()=>void; onGoStep:(step:number)=>void; onCake:(received:boolean)=>void; onFinish:()=>void; onCancel:()=>void };
 function ReceptionWizard(props:WizardProps) {
   const { guest, step, editingAttendance, editingCake, isEdit, saving, conflictMessage, saveError, onReload, onBack, onChange, onEditAttendance, onEditCake, onGoGift, onGoCake, onGoStep, onCake, onFinish, onCancel } = props;
+  const receptionReminder=visibleSourceNote(guest.sourceNote);
   return <section className="content reception-card"><button className="back" type="button" onClick={onBack}>‹ 返回{isEdit?'已接待':'賓客列表'}</button><div className="selected-title"><h2>{guest.name}</h2></div><Progress step={step} />
+    {receptionReminder&&<div className="source-note-banner" role="note"><b>接待提醒</b><span>{receptionReminder}</span></div>}
     {conflictMessage&&<div className="draft-alert conflict-alert" role="alert"><div><b>另一台裝置已更新這位賓客</b><span>{conflictMessage}</span></div><button type="button" onClick={onReload}>載入最新資料</button></div>}
     {saveError&&<div className="draft-alert save-alert" role="alert"><div><b>尚未儲存成功</b><span>{saveError}</span></div></div>}
     <div className="wizard-panel">
@@ -473,7 +479,7 @@ function AdminPanel({state,completed,imported,sourceName,importBusy,importFeedba
   const [guestQuery,setGuestQuery]=useState('');
   const summary=imported?importSummary(state.guests,imported.guests):null;
   const giftTotal=completed.reduce((sum,guest)=>sum+(guest.giftAmount||0),0);
-  const filteredGuests=state.guests.filter(g=>`${g.name}${g.category}${g.phone}${formatTables(g)}`.toLowerCase().includes(guestQuery.trim().toLowerCase()));
+  const filteredGuests=state.guests.filter(g=>`${g.name}${g.category}${g.phone}${g.sourceNote||''}${formatTables(g)}`.toLowerCase().includes(guestQuery.trim().toLowerCase()));
   const saveSettings=async()=>{setSettingsBusy(true);try{await onSaveSettings({eventName,cakeStockChinese,cakeStockWestern});}finally{setSettingsBusy(false);}};
   const toggleReception=async()=>{if(state.settings.receptionOpen&&!window.confirm('關閉後，接待人員與婚顧都無法進入。確定關閉嗎？'))return;setSettingsBusy(true);try{await onSaveSettings({receptionOpen:!state.settings.receptionOpen});}finally{setSettingsBusy(false);}};
   return <section className="content admin-page">
@@ -496,7 +502,7 @@ function AdminPanel({state,completed,imported,sourceName,importBusy,importFeedba
 }
 
 function GuestDataTable({guests,compact=false}:{guests:GuestGroup[];compact?:boolean}) {
-  return <div className={`guest-data-wrap ${compact?'compact':''}`}><table className="guest-data-table"><thead><tr><th>賓客</th><th>分類</th><th>電話</th><th>應到</th><th>桌次</th><th>素食</th><th>兒童椅</th><th>中式餅</th><th>西式餅</th><th>狀態</th></tr></thead><tbody>{guests.map(g=><tr key={g.id}><td data-label="賓客"><b>{g.name}</b></td><td data-label="分類">{g.category}</td><td data-label="電話">{g.phone||'—'}</td><td data-label="應到">{g.expected}</td><td data-label="桌次">{formatTables(g)}</td><td data-label="素食">{g.vegetarianExpected}</td><td data-label="兒童椅">{g.childChairExpected}</td><td data-label="中式餅">{g.cakeChinesePlanned}</td><td data-label="西式餅">{g.cakeWesternPlanned}</td><td data-label="狀態">{g.completed?'已接待':'等待'}</td></tr>)}</tbody></table></div>;
+  return <div className={`guest-data-wrap ${compact?'compact':''}`}><table className="guest-data-table"><thead><tr><th>賓客</th><th>分類</th><th>電話</th><th>應到</th><th>桌次</th><th>素食</th><th>兒童椅</th><th>中式餅</th><th>西式餅</th><th>名單備註</th><th>狀態</th></tr></thead><tbody>{guests.map(g=><tr key={g.id}><td data-label="賓客"><b>{g.name}</b></td><td data-label="分類">{g.category}</td><td data-label="電話">{g.phone||'—'}</td><td data-label="應到">{g.expected}</td><td data-label="桌次">{formatTables(g)}</td><td data-label="素食">{g.vegetarianExpected}</td><td data-label="兒童椅">{g.childChairExpected}</td><td data-label="中式餅">{g.cakeChinesePlanned}</td><td data-label="西式餅">{g.cakeWesternPlanned}</td><td data-label="名單備註">{g.sourceNote||'—'}</td><td data-label="狀態">{g.completed?'已接待':'等待'}</td></tr>)}</tbody></table></div>;
 }
 
 function Empty({title,copy}:{title:string;copy:string}) { return <div className="empty"><span aria-hidden="true">○</span><h3>{title}</h3><p>{copy}</p></div>; }

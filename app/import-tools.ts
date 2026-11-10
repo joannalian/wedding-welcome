@@ -71,7 +71,7 @@ export function rowsToGuests(rows: Row[]): GuestGroup[] {
       cakeChinesePlanned: chinese, cakeChineseDelivered: 0, cakeChineseOwed: 0,
       cakeWesternPlanned: western, cakeWesternDelivered: 0, cakeWesternOwed: 0,
       giftReceived: false, bagNamed: false, giftName: '', giftAmount: null,
-      note: members.map((row) => text(row['備註'])).find(Boolean) || '',
+      sourceNote: members.map((row) => text(row['備註'])).find(Boolean) || '', note: '',
       completed: false, completedAt: null, completedBy: '', updatedAt: now,
     } as GuestGroup;
   });
